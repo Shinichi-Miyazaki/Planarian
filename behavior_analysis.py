@@ -7,6 +7,9 @@ import os
 import re
 from scipy import stats
 import warnings
+import tkinter as tk
+from tkinter import filedialog
+
 warnings.filterwarnings('ignore')
 
 # 日本語フォント設定
@@ -389,12 +392,12 @@ class BehaviorAnalyzer:
 
 def main():
     """メイン実行関数"""
-    # CSVファイルのパスを指定
-    csv_path = 'C:/Users/Shinichi/Downloads/planarian250714/planarian250714/results.csv'  # results.csvファイルのパス
-
-    if not os.path.exists(csv_path):
-        print(f"CSVファイルが見つかりません: {csv_path}")
-        print("animal_detector_gui.pyで解析を実行してresults.csvを生成してください")
+    # --- GUIでCSVファイル選択 ---
+    root = tk.Tk()
+    root.withdraw()
+    csv_path = filedialog.askopenfilename(title='results.csvを選択', filetypes=[('CSV files', '*.csv')])
+    if not csv_path:
+        print('CSVファイルが選択されませんでした')
         return
 
     # results.csvと同じディレクトリにfiguresフォルダを作成
