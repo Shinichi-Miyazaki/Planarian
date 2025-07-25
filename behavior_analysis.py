@@ -18,16 +18,20 @@ plt.rcParams['figure.figsize'] = (12, 8)
 plt.rcParams['figure.dpi'] = 300
 
 class BehaviorAnalyzer:
-    def __init__(self, csv_path, time_interval_minutes=10):
+    def __init__(self, csv_path, time_interval_minutes=10, day_start_time='07:00', night_start_time='19:00'):
         """
         動物行動解析クラス
 
         Parameters:
         csv_path: CSVファイルのパス
         time_interval_minutes: 時間間隔（分）
+        day_start_time: 昼の開始時間 (HH:MM形式)
+        night_start_time: 夜の開始時間 (HH:MM形式)
         """
         self.csv_path = csv_path
         self.time_interval = time_interval_minutes
+        self.day_start_time = day_start_time
+        self.night_start_time = night_start_time
         self.df = None
         self.processed_df = None
 
@@ -234,6 +238,10 @@ class BehaviorAnalyzer:
     def _plot_movement(self, output_dir):
         """移動量プロット"""
         plt.figure(figsize=(12, 6))
+        ax = plt.gca()
+
+        # 夜間背景を追加
+        self._add_night_background(ax)
 
         x = self.processed_df['datetime']
 
@@ -248,8 +256,8 @@ class BehaviorAnalyzer:
         plt.grid(True, alpha=0.3)
 
         # X軸の日時フォーマット
-        plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
-        plt.gca().xaxis.set_major_locator(mdates.HourLocator(interval=2))
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M'))
+        ax.xaxis.set_major_locator(mdates.HourLocator(interval=2))
         plt.xticks(rotation=45)
 
         plt.tight_layout()
@@ -259,6 +267,10 @@ class BehaviorAnalyzer:
     def _plot_immobility(self, output_dir):
         """不動割合プロット"""
         plt.figure(figsize=(12, 6))
+        ax = plt.gca()
+
+        # 夜間背景を追加
+        self._add_night_background(ax)
 
         x = self.processed_df['datetime']
 
@@ -274,8 +286,8 @@ class BehaviorAnalyzer:
         plt.ylim(0, 100)
 
         # X軸の日時フォーマット
-        plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
-        plt.gca().xaxis.set_major_locator(mdates.HourLocator(interval=2))
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M'))
+        ax.xaxis.set_major_locator(mdates.HourLocator(interval=2))
         plt.xticks(rotation=45)
 
         plt.tight_layout()
@@ -285,6 +297,10 @@ class BehaviorAnalyzer:
     def _plot_body_length(self, output_dir):
         """体長変化プロット"""
         plt.figure(figsize=(12, 6))
+        ax = plt.gca()
+
+        # 夜間背景を追加
+        self._add_night_background(ax)
 
         x = self.processed_df['datetime']
 
@@ -304,8 +320,8 @@ class BehaviorAnalyzer:
         plt.grid(True, alpha=0.3)
 
         # X軸の日時フォーマット
-        plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
-        plt.gca().xaxis.set_major_locator(mdates.HourLocator(interval=2))
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M'))
+        ax.xaxis.set_major_locator(mdates.HourLocator(interval=2))
         plt.xticks(rotation=45)
 
         plt.tight_layout()
@@ -317,6 +333,10 @@ class BehaviorAnalyzer:
         fig, axes = plt.subplots(3, 1, figsize=(12, 12))
 
         x = self.processed_df['datetime']
+
+        # 各サブプロットに夜間背景を追加
+        for ax in axes:
+            self._add_night_background(ax)
 
         # 1. 移動量
         axes[0].plot(x, self.processed_df['total_movement'], 'o-', alpha=0.6, markersize=2)
@@ -339,12 +359,16 @@ class BehaviorAnalyzer:
         axes[2].set_xlabel('Time')
         axes[2].grid(True, alpha=0.3)
 
-        # X軸の日時フォーマット（全てのサブプロットに適用）
-        for ax in axes:
-            ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
-            ax.xaxis.set_major_locator(mdates.HourLocator(interval=2))
+        # X軸の設定：一番下のサブプロットのみに時刻表示
+        for i, ax in enumerate(axes):
+            if i < 2:  # 上の2つのサブプロット
+                ax.set_xticklabels([])  # X軸ラベルを非表示
+                ax.tick_params(axis='x', which='both', bottom=False)  # X軸の目盛りも非表示
+            else:  # 一番下のサブプロット
+                ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))  # 時刻のみ表示
+                ax.xaxis.set_major_locator(mdates.HourLocator(interval=2))
+                plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
 
-        plt.xticks(rotation=45)
         plt.tight_layout()
         plt.savefig(os.path.join(output_dir, 'combined_analysis.png'), dpi=300, bbox_inches='tight')
         plt.close()
@@ -390,6 +414,34 @@ class BehaviorAnalyzer:
 
         print(report)
 
+    def _add_night_background(self, ax):
+        """グラフに夜の時間帯の背景を追加"""
+        if self.processed_df is None or len(self.processed_df) == 0:
+            return
+
+        try:
+            from datetime import datetime, time
+            import pandas as pd
+
+            day_start = datetime.strptime(self.day_start_time, '%H:%M').time()
+            night_start = datetime.strptime(self.night_start_time, '%H:%M').time()
+
+            # データの日付範囲を取得
+            unique_dates = self.processed_df['datetime'].dt.date.unique()
+
+            for d in unique_dates:
+                night_start_dt = datetime.combine(d, night_start)
+                # 夜の開始時間が昼の開始時間より遅い場合（通常の昼夜）
+                if night_start > day_start:
+                    day_end_dt = datetime.combine(d + pd.Timedelta(days=1), day_start)
+                # 日をまたぐ場合（例：夜19:00～朝7:00）
+                else:
+                    day_end_dt = datetime.combine(d, day_start)
+
+                ax.axvspan(night_start_dt, day_end_dt, facecolor='gray', alpha=0.2, label='Night' if d == unique_dates[0] else "")
+        except Exception as e:
+            print(f"夜間背景の追加中にエラーが発生しました: {e}")
+
 def main():
     """メイン実行関数"""
     # --- GUIでCSVファイル選択 ---
@@ -404,8 +456,27 @@ def main():
     csv_dir = os.path.dirname(csv_path)
     output_dir = os.path.join(csv_dir, 'figures')
 
-    # 解析器を初期化（10分間隔で解析）
-    analyzer = BehaviorAnalyzer(csv_path, time_interval_minutes=10)
+    # 時間設定を読み込み
+    day_start_time = '07:00'
+    night_start_time = '19:00'
+
+    config_path = os.path.join(csv_dir, 'time_config.json')
+    if os.path.exists(config_path):
+        try:
+            import json
+            with open(config_path, 'r') as f:
+                time_config = json.load(f)
+                day_start_time = time_config.get('day_start_time', '07:00')
+                night_start_time = time_config.get('night_start_time', '19:00')
+            print(f"時間設定を読み込みました: 昼開始 {day_start_time}, 夜開始 {night_start_time}")
+        except Exception as e:
+            print(f"時間設定の読み込みに失敗しました: {e}, デフォルト値を使用します")
+    else:
+        print("時間設定ファイルが見つかりません。デフォルト値を使用します")
+
+    # 解析器を初期化（10分間隔で解析、時間設定を適用）
+    analyzer = BehaviorAnalyzer(csv_path, time_interval_minutes=10,
+                               day_start_time=day_start_time, night_start_time=night_start_time)
 
     # データ読み込みと前処理
     if not analyzer.load_data():
