@@ -35,6 +35,13 @@ class BehaviorAnalyzer:
         self.df = None
         self.processed_df = None
 
+        # Constant darkness条件の判定
+        self.is_constant_darkness = (day_start_time == night_start_time)
+        if self.is_constant_darkness:
+            print("Constant darkness condition detected")
+        else:
+            print(f"Light-dark cycle condition: Day {day_start_time} - {night_start_time}")
+
     def load_data(self):
         """CSVデータを読み込み、前処理を行う"""
         try:
@@ -221,6 +228,44 @@ class BehaviorAnalyzer:
 
         os.makedirs(output_dir, exist_ok=True)
 
+        print(report)
+
+    def _add_night_background(self, ax):
+        """グラフに夜の時間帯の背景を追加（Constant darkness条件では何もしない）"""
+        if self.processed_df is None or len(self.processed_df) == 0 or self.is_constant_darkness:
+            return
+
+        try:
+            from datetime import datetime, time
+            import pandas as pd
+
+            day_start = datetime.strptime(self.day_start_time, '%H:%M').time()
+            night_start = datetime.strptime(self.night_start_time, '%H:%M').time()
+
+            # データの日付範囲を取得
+            unique_dates = self.processed_df['datetime'].dt.date.unique()
+
+            for d in unique_dates:
+                night_start_dt = datetime.combine(d, night_start)
+                # 夜の開始時間が昼の開始時間より遅い場合（通常の昼夜）
+                if night_start > day_start:
+                    day_end_dt = datetime.combine(d + pd.Timedelta(days=1), day_start)
+                # 日をまたぐ場合（例：夜19:00～朝7:00）
+                else:
+                    day_end_dt = datetime.combine(d, day_start)
+
+                ax.axvspan(night_start_dt, day_end_dt, facecolor='gray', alpha=0.2, label='Night' if d == unique_dates[0] else "")
+        except Exception as e:
+            print(f"夜間背景の追加中にエラーが発生しました: {e}")
+
+def main():
+    """メイン実行関数"""
+    # --- GUIでCSVファイル選択 ---
+    root = tk.Tk()
+    root.withdraw()
+    csv_path = filedialog.askopenfilename(title='results.csvを選択', filetypes=[('CSV files', '*.csv')])
+    if not csv_path:
+        print('CSVファイルが選択されませんでした')
         # 1. 移動量のプロット
         self._plot_movement(output_dir)
 
@@ -269,6 +314,9 @@ class BehaviorAnalyzer:
         plt.figure(figsize=(12, 6))
         ax = plt.gca()
 
+    # 詳細CSVファイルを保存
+    analyzer.save_detailed_csv(output_dir)
+
         # 夜間背景を追加
         self._add_night_background(ax)
 
@@ -290,8 +338,9 @@ class BehaviorAnalyzer:
         ax.xaxis.set_major_locator(mdates.HourLocator(interval=2))
         plt.xticks(rotation=45)
 
-        plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, 'immobility_analysis.png'), dpi=300, bbox_inches='tight')
+        # 夜間背景を追加（Constant darkness条件では追加しない）
+        if not self.is_constant_darkness:
+            self._add_night_background(ax)
         plt.close()
 
     def _plot_body_length(self, output_dir):
@@ -301,6 +350,12 @@ class BehaviorAnalyzer:
 
         # 夜間背景を追加
         self._add_night_background(ax)
+
+        # タイトルを条件に応じて変更
+        if self.is_constant_darkness:
+            plt.title(f'Animal Movement Over Time - Constant Darkness ({self.time_interval}-minute intervals)')
+        else:
+            plt.title(f'Animal Movement Over Time - Light-Dark Cycle ({self.time_interval}-minute intervals)')
 
         x = self.processed_df['datetime']
 
@@ -319,8 +374,9 @@ class BehaviorAnalyzer:
         plt.legend()
         plt.grid(True, alpha=0.3)
 
-        # X軸の日時フォーマット
-        ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M'))
+        # 夜間背景を追加（Constant darkness条件では追加しない）
+        if not self.is_constant_darkness:
+            self._add_night_background(ax)
         ax.xaxis.set_major_locator(mdates.HourLocator(interval=2))
         plt.xticks(rotation=45)
 
@@ -330,7 +386,13 @@ class BehaviorAnalyzer:
 
     def _plot_combined(self, output_dir):
         """統合プロット（3つのグラフを縦に並べる）"""
-        fig, axes = plt.subplots(3, 1, figsize=(12, 12))
+
+        # タイトルを条件に応じて変更
+        if self.is_constant_darkness:
+            plt.title(f'Animal Immobility Ratio Over Time - Constant Darkness ({self.time_interval}-minute intervals)')
+        else:
+            plt.title(f'Animal Immobility Ratio Over Time - Light-Dark Cycle ({self.time_interval}-minute intervals)')
+
 
         x = self.processed_df['datetime']
 
@@ -349,8 +411,9 @@ class BehaviorAnalyzer:
         axes[1].plot(x, self.processed_df['immobility_ratio'] * 100, 'o-', alpha=0.6, markersize=2)
         axes[1].plot(x, self.processed_df['immobility_ma'] * 100, 'g-', linewidth=2)
         axes[1].set_ylabel('Immobility Ratio (%)')
-        axes[1].set_ylim(0, 100)
-        axes[1].grid(True, alpha=0.3)
+        # 夜間背景を追加（Constant darkness条件では追加しない）
+        if not self.is_constant_darkness:
+            self._add_night_background(ax)
 
         # 3. 体長
         axes[2].plot(x, self.processed_df['mean_body_length'], 'o-', alpha=0.6, markersize=2)
@@ -365,13 +428,153 @@ class BehaviorAnalyzer:
                 ax.set_xticklabels([])  # X軸ラベルを非表示
                 ax.tick_params(axis='x', which='both', bottom=False)  # X軸の目盛りも非表示
             else:  # 一番下のサブプロット
-                ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))  # 時刻のみ表示
+
+        # タイトルを条件に応じて変更
+        if self.is_constant_darkness:
+            plt.title(f'Animal Body Length Changes Over Time - Constant Darkness ({self.time_interval}-minute intervals)')
+        else:
+            plt.title(f'Animal Body Length Changes Over Time - Light-Dark Cycle ({self.time_interval}-minute intervals)')
+
                 ax.xaxis.set_major_locator(mdates.HourLocator(interval=2))
                 plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
 
         plt.tight_layout()
         plt.savefig(os.path.join(output_dir, 'combined_analysis.png'), dpi=300, bbox_inches='tight')
         plt.close()
+
+        return
+
+    # results.csvと同じディレクトリにfiguresフォルダを作成
+    csv_dir = os.path.dirname(csv_path)
+    output_dir = os.path.join(csv_dir, 'figures')
+
+    # 時間設定を読み込み
+    day_start_time = '07:00'
+    night_start_time = '19:00'
+
+    config_path = os.path.join(csv_dir, 'time_config.json')
+        # 各サブプロットに夜間背景を追加（Constant darkness条件では追加しない）
+        if not self.is_constant_darkness:
+            for ax in axes:
+                self._add_night_background(ax)
+            with open(config_path, 'r') as f:
+                time_config = json.load(f)
+                day_start_time = time_config.get('day_start_time', '07:00')
+                night_start_time = time_config.get('night_start_time', '19:00')
+            print(f"時間設定を読み込みました: 昼開始 {day_start_time}, 夜開始 {night_start_time}")
+
+        # タイトルを条件に応じて変更
+        if self.is_constant_darkness:
+            axes[0].set_title('Animal Behavior Analysis - Constant Darkness')
+        else:
+            axes[0].set_title('Animal Behavior Analysis - Light-Dark Cycle')
+
+            print(f"時間設定の読み込みに失敗しました: {e}, デフォルト値を使用します")
+    else:
+        print("時間設定ファイルが見つかりません。デフォルト値を使用します")
+
+    # 解析器を初期化（10分間隔で解析、時間設定を適用）
+    analyzer = BehaviorAnalyzer(csv_path, time_interval_minutes=10,
+                               day_start_time=day_start_time, night_start_time=night_start_time)
+
+    # データ読み込みと前処理
+    if not analyzer.load_data():
+        return
+
+    # 移動量と不動性を計算
+    analyzer.calculate_movement()
+    analyzer.calculate_immobility_ratio()
+
+    # 時間ビンごとに集約
+    analyzer.aggregate_by_time()
+
+    # 移動平均を適用
+    analyzer.apply_moving_average(window=3)
+
+    # グラフ作成（figuresフォルダに保存）
+    analyzer.create_plots(output_dir)
+
+    # サマリーレポート生成
+    analyzer.generate_summary_report(output_dir)
+
+if __name__ == "__main__":
+    main()
+    def save_detailed_csv(self, output_dir='plots'):
+        """詳細なCSVファイルを保存"""
+        if self.df is None:
+            print("元データがありません")
+            return
+
+        os.makedirs(output_dir, exist_ok=True)
+
+        # 1. 元データ（フレームごと）の詳細CSV
+        detailed_df = self.df.copy()
+        detailed_df['movement_threshold'] = detailed_df['body_length'] * 0.01  # 不動判定の閾値
+        detailed_df['is_day'] = detailed_df['datetime'].apply(self._is_daytime)
+
+        # CSVファイルに保存
+        raw_csv_path = os.path.join(output_dir, 'detailed_immobility_analysis.csv')
+        detailed_df.to_csv(raw_csv_path, index=False)
+
+        # 2. 時間集約データのCSV
+        if self.processed_df is not None:
+            aggregated_csv_path = os.path.join(output_dir, 'aggregated_immobility_analysis.csv')
+
+            # 昼夜判定を追加
+            processed_with_time = self.processed_df.copy()
+            processed_with_time['is_day'] = processed_with_time['datetime'].apply(self._is_daytime)
+            processed_with_time['immobility_percentage'] = processed_with_time['immobility_ratio'] * 100
+
+            processed_with_time.to_csv(aggregated_csv_path, index=False)
+
+            # 3. 昼夜別の統計サマリーCSV
+            summary_stats = self._calculate_day_night_stats(processed_with_time)
+            summary_csv_path = os.path.join(output_dir, 'day_night_summary.csv')
+            summary_stats.to_csv(summary_csv_path, index=False)
+
+        print(f"詳細CSVファイルを保存しました:")
+        print(f"  - フレームごとデータ: {raw_csv_path}")
+        if self.processed_df is not None:
+            print(f"  - 時間集約データ: {aggregated_csv_path}")
+            print(f"  - 昼夜別統計: {summary_csv_path}")
+
+    def _calculate_day_night_stats(self, df):
+        """昼夜別の統計を計算"""
+        stats_list = []
+
+        for period in ['Day', 'Night']:
+            is_day = period == 'Day'
+            period_data = df[df['is_day'] == is_day]
+
+            if len(period_data) > 0:
+                stats = {
+                    'Period': period,
+                    'Data_Points': len(period_data),
+                    'Mean_Movement': period_data['total_movement'].mean(),
+                    'Std_Movement': period_data['total_movement'].std(),
+                    'Max_Movement': period_data['total_movement'].max(),
+                    'Min_Movement': period_data['total_movement'].min(),
+                    'Mean_Immobility_Ratio': period_data['immobility_ratio'].mean(),
+                    'Mean_Immobility_Percentage': period_data['immobility_ratio'].mean() * 100,
+                    'Max_Immobility_Percentage': period_data['immobility_ratio'].max() * 100,
+                    'Min_Immobility_Percentage': period_data['immobility_ratio'].min() * 100,
+                    'Mean_Body_Length': period_data['mean_body_length'].mean(),
+                    'Std_Body_Length': period_data['std_body_length'].mean()
+                }
+                stats_list.append(stats)
+
+        return pd.DataFrame(stats_list)
+
+    def _is_daytime(self, dt):
+        """指定された時刻が昼間かどうかを判定"""
+        day_start = datetime.strptime(self.day_start_time, '%H:%M').time()
+        night_start = datetime.strptime(self.night_start_time, '%H:%M').time()
+        current_time = dt.time()
+
+        if day_start < night_start:  # 通常のケース (例: 7:00-19:00が昼)
+            return day_start <= current_time < night_start
+        else:  # 日をまたぐケース (例: 19:00-7:00が夜)
+            return not (night_start <= current_time < day_start)
 
     def generate_summary_report(self, output_dir='plots'):
         """解析結果のサマリーレポートを生成"""
@@ -412,91 +615,3 @@ class BehaviorAnalyzer:
         with open(os.path.join(output_dir, 'analysis_report.txt'), 'w', encoding='utf-8') as f:
             f.write(report)
 
-        print(report)
-
-    def _add_night_background(self, ax):
-        """グラフに夜の時間帯の背景を追加"""
-        if self.processed_df is None or len(self.processed_df) == 0:
-            return
-
-        try:
-            from datetime import datetime, time
-            import pandas as pd
-
-            day_start = datetime.strptime(self.day_start_time, '%H:%M').time()
-            night_start = datetime.strptime(self.night_start_time, '%H:%M').time()
-
-            # データの日付範囲を取得
-            unique_dates = self.processed_df['datetime'].dt.date.unique()
-
-            for d in unique_dates:
-                night_start_dt = datetime.combine(d, night_start)
-                # 夜の開始時間が昼の開始時間より遅い場合（通常の昼夜）
-                if night_start > day_start:
-                    day_end_dt = datetime.combine(d + pd.Timedelta(days=1), day_start)
-                # 日をまたぐ場合（例：夜19:00～朝7:00）
-                else:
-                    day_end_dt = datetime.combine(d, day_start)
-
-                ax.axvspan(night_start_dt, day_end_dt, facecolor='gray', alpha=0.2, label='Night' if d == unique_dates[0] else "")
-        except Exception as e:
-            print(f"夜間背景の追加中にエラーが発生しました: {e}")
-
-def main():
-    """メイン実行関数"""
-    # --- GUIでCSVファイル選択 ---
-    root = tk.Tk()
-    root.withdraw()
-    csv_path = filedialog.askopenfilename(title='results.csvを選択', filetypes=[('CSV files', '*.csv')])
-    if not csv_path:
-        print('CSVファイルが選択されませんでした')
-        return
-
-    # results.csvと同じディレクトリにfiguresフォルダを作成
-    csv_dir = os.path.dirname(csv_path)
-    output_dir = os.path.join(csv_dir, 'figures')
-
-    # 時間設定を読み込み
-    day_start_time = '07:00'
-    night_start_time = '19:00'
-
-    config_path = os.path.join(csv_dir, 'time_config.json')
-    if os.path.exists(config_path):
-        try:
-            import json
-            with open(config_path, 'r') as f:
-                time_config = json.load(f)
-                day_start_time = time_config.get('day_start_time', '07:00')
-                night_start_time = time_config.get('night_start_time', '19:00')
-            print(f"時間設定を読み込みました: 昼開始 {day_start_time}, 夜開始 {night_start_time}")
-        except Exception as e:
-            print(f"時間設定の読み込みに失敗しました: {e}, デフォルト値を使用します")
-    else:
-        print("時間設定ファイルが見つかりません。デフォルト値を使用します")
-
-    # 解析器を初期化（10分間隔で解析、時間設定を適用）
-    analyzer = BehaviorAnalyzer(csv_path, time_interval_minutes=10,
-                               day_start_time=day_start_time, night_start_time=night_start_time)
-
-    # データ読み込みと前処理
-    if not analyzer.load_data():
-        return
-
-    # 移動量と不動性を計算
-    analyzer.calculate_movement()
-    analyzer.calculate_immobility_ratio()
-
-    # 時間ビンごとに集約
-    analyzer.aggregate_by_time()
-
-    # 移動平均を適用
-    analyzer.apply_moving_average(window=3)
-
-    # グラフ作成（figuresフォルダに保存）
-    analyzer.create_plots(output_dir)
-
-    # サマリーレポート生成
-    analyzer.generate_summary_report(output_dir)
-
-if __name__ == "__main__":
-    main()

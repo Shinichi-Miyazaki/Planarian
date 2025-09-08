@@ -11,12 +11,98 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import matplotlib.dates as mdates
 from datetime import datetime, time
+import json
+
+"""
+todo filtering後に最大のparticleを個体とした方がよさそう。 (たいていのオブジェクトはfilter outできる。) 
+おそらく現状は中央に最も近いものが選択されている。
+rolling ballがうまくいっていない感じなので、Image Jと何が違うのかを調べて改良
+
+Readmeの書き直し
+"""
+
+def create_temporal_median_background(image_paths, num_frames=100):
+    """
+    Temporal median filterを使って背景を作成
+
+    Args:
+        image_paths: 画像ファイルパスのリスト
+        num_frames: 背景作成に使用するフレーム数
+
+    Returns:
+        background: 作成された背景画像（グレースケール）
+    """
+    if len(image_paths) < num_frames:
+        num_frames = len(image_paths)
+
+    # 等間隔にフレームを選択
+    indices = np.linspace(0, len(image_paths) - 1, num_frames, dtype=int)
+    selected_paths = [image_paths[i] for i in indices]
+
+    images = []
+    for path in selected_paths:
+        img = cv2.imread(path)
+        if img is not None:
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            images.append(gray)
+
+    if not images:
+        return None
+
+    # すべての画像を3次元配列に変換
+    image_stack = np.stack(images, axis=-1)
+
+    # temporal medianを計算
+    background = np.median(image_stack, axis=-1).astype(np.uint8)
+
+    return background
+
+def apply_temporal_median_subtraction(image, background):
+    """
+    画像から背景を引き算して前景を抽出
+
+    Args:
+        image: 元画像
+        background: 背景画像
+
+    Returns:
+        foreground: 前景画像
+    """
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+    # 背景を引き算
+    foreground = cv2.subtract(gray, background)
+
+    # コントラストを強調
+    foreground = cv2.addWeighted(foreground, 1.5, np.zeros_like(foreground), 0, 0)
+
+    return foreground
 
 def remove_background_rolling_ball(image, radius=50):
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     selem = disk(radius)
     bg_removed = white_tophat(gray, selem)
     return bg_removed
+
+def remove_background_rolling_ball_improved(image, radius=50):
+    """
+    ImageJのRolling Ball Background Subtractionにより近い実装
+    """
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+    # より大きなカーネルサイズでモルフォロジー処理
+    kernel_size = max(radius * 2 + 1, 3)  # radiusの2倍+1、最小3
+    if kernel_size % 2 == 0:
+        kernel_size += 1  # 奇数にする
+
+    # Top-hat変換による背景除去
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+    tophat = cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, kernel)
+
+    # ガウシアンフィルタでノイズを軽減
+    tophat = cv2.GaussianBlur(tophat, (3, 3), 0)
+
+    return tophat
 
 def remove_background_simple(image, kernel_size=50):
     """軽量なバックグラウンド除去（ガウシアンブラー使用）"""
@@ -32,6 +118,47 @@ def remove_background_simple(image, kernel_size=50):
     background = cv2.GaussianBlur(gray, (kernel_size, kernel_size), 0)
     foreground = cv2.subtract(gray, background)
     return foreground
+
+def enhance_contrast(image, use_contrast=False, alpha=1.5, beta=0, use_clahe=False, clip_limit=3.0):
+    """
+    コントラスト調整関数
+
+    Args:
+        image: 入力画像（BGR形式）
+        use_contrast: 基本的なコントラスト調整を使用するかどうか
+        alpha: コントラスト倍率（1.0=変化なし、>1.0で強化）
+        beta: 明度調整（-100～100程度）
+        use_clahe: CLAHE（局所適応ヒストグラム平坦化）を使用するかどうか
+        clip_limit: CLAHEのクリップ制限
+
+    Returns:
+        enhanced_image: コントラスト調整後の画像
+    """
+    if not use_contrast and not use_clahe:
+        return image
+
+    # グレースケールに変換
+    if len(image.shape) == 3:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = image.copy()
+
+    enhanced = gray.copy()
+
+    # 基本的なコントラスト・明度調整
+    if use_contrast:
+        enhanced = cv2.convertScaleAbs(enhanced, alpha=alpha, beta=beta)
+
+    # CLAHE（局所適応ヒストグラム平坦化）
+    if use_clahe:
+        clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8))
+        enhanced = clahe.apply(enhanced)
+
+    # 3チャンネルに戻す
+    if len(image.shape) == 3:
+        enhanced = cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
+
+    return enhanced
 
 # --- 画像解析関数 ---
 def is_daytime(image, threshold):
@@ -80,7 +207,14 @@ def binarize(image, method='adaptive', relative_thresh=0.1, block_size=11, c_val
 
     return binary
 
-def analyze(binary, min_area=100, max_area=10000, select_center_only=True, scale_factor=1.0, roi_offset_x=0, roi_offset_y=0):
+def analyze(binary, min_area=100, max_area=10000, select_center_only=True, select_largest=False, scale_factor=1.0, roi_offset_x=0, roi_offset_y=0):
+    """
+    個体検出・解析関数（改良版）
+
+    Args:
+        select_largest: Trueの場合、最大面積の個体を選択
+        select_center_only: Trueの場合、中心に最も近い個体を選択（select_largestがFalseの時のみ）
+    """
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     results = []
     valid_contours = []
@@ -132,16 +266,22 @@ def analyze(binary, min_area=100, max_area=10000, select_center_only=True, scale
         }
         candidates.append(candidate)
 
-    if select_center_only and candidates:
-        # 中心に最も近い1つだけを選択
-        closest_candidate = min(candidates, key=lambda x: x['distance_from_center'])
-        results.append({k: v for k, v in closest_candidate.items() if k != 'contour'})
-        valid_contours.append(closest_candidate['contour'])
-    else:
-        # すべての候補を返す（従来の動作）
-        for candidate in candidates:
-            results.append({k: v for k, v in candidate.items() if k != 'contour'})
-            valid_contours.append(candidate['contour'])
+    if candidates:
+        if select_largest:
+            # 最大面積の個体を選択
+            largest_candidate = max(candidates, key=lambda x: x['area'])
+            results.append({k: v for k, v in largest_candidate.items() if k != 'contour'})
+            valid_contours.append(largest_candidate['contour'])
+        elif select_center_only:
+            # 中心に最も近い個体を選択
+            closest_candidate = min(candidates, key=lambda x: x['distance_from_center'])
+            results.append({k: v for k, v in closest_candidate.items() if k != 'contour'})
+            valid_contours.append(closest_candidate['contour'])
+        else:
+            # すべての候補を返す
+            for candidate in candidates:
+                results.append({k: v for k, v in candidate.items() if k != 'contour'})
+                valid_contours.append(candidate['contour'])
 
     return results, valid_contours
 
@@ -169,9 +309,22 @@ class AnimalDetectorGUI:
         self.use_bg_removal = tk.BooleanVar(value=False)  # バックグラウンド除去の使用
         self.bg_kernel_size = tk.IntVar(value=31)  # バックグラウンド除去のカーネルサイズ
 
+        # Temporal Median Filter設定
+        self.use_temporal_median = tk.BooleanVar(value=False)  # Temporal median filterの使用
+        self.temporal_frames = tk.IntVar(value=100)  # 背景作成に使用するフレーム数
+        self.temporal_background = None  # 作成された背景画像を保存
+
+        # 動画保存設定
+        self.save_video = tk.BooleanVar(value=False)  # 動画保存の使用
+        self.video_fps = tk.IntVar(value=10)  # 動画のFPS
+        self.video_scale = tk.DoubleVar(value=0.5)  # 動画のスケール（低画質化）
+
         # 時間設定
         self.day_start_time = tk.StringVar(value='07:00')
         self.night_start_time = tk.StringVar(value='19:00')
+
+        # 測定開始時刻設定
+        self.measurement_start_time = tk.StringVar(value='09:00:00')  # デフォルト9時開始
 
         # ROI関連
         self.roi_coordinates = None  # (x1, y1, x2, y2) in original image coordinates
@@ -179,6 +332,17 @@ class AnimalDetectorGUI:
         self.drawing_roi = False
         self.roi_start_x = 0
         self.roi_start_y = 0
+
+        # 個体選択方法設定を追加
+        self.select_largest = tk.BooleanVar(value=True)  # 最大面積の個体を選択
+        self.constant_darkness = tk.BooleanVar(value=False)  # Constant darkness条件
+
+        # コントラスト調整設定を追加
+        self.use_contrast_enhancement = tk.BooleanVar(value=False)  # コントラスト強化の使用
+        self.contrast_alpha = tk.DoubleVar(value=1.5)  # コントラスト倍率（1.0=変化なし、>1.0で強化）
+        self.brightness_beta = tk.IntVar(value=0)  # 明度調整（-100～100程度）
+        self.use_clahe = tk.BooleanVar(value=False)  # CLAHE（局所適応ヒストグラム平坦化）の使用
+        self.clahe_clip_limit = tk.DoubleVar(value=3.0)  # CLAHEのクリップ制限
 
         self.create_widgets()
 
@@ -191,100 +355,181 @@ class AnimalDetectorGUI:
         left_frame = tk.Frame(main_frame)
         left_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
 
-        # フォルダ選択
-        tk.Label(left_frame, text='画像フォルダ:', font=('Arial', 10, 'bold')).grid(row=0, column=0, sticky='w', pady=(5,0))
-        tk.Entry(left_frame, textvariable=self.folder_path, width=40).grid(row=1, column=0, padx=5, pady=2)
-        tk.Button(left_frame, text='選択', command=self.select_folder).grid(row=1, column=1, padx=5, pady=2)
+        # フォルダ選択（コンパクト化）
+        tk.Label(left_frame, text='画像フォルダ:', font=('Arial', 9, 'bold')).grid(row=0, column=0, sticky='w', pady=(2,0))
+        folder_frame = tk.Frame(left_frame)
+        folder_frame.grid(row=1, column=0, columnspan=2, pady=1, sticky='ew')
+        tk.Entry(folder_frame, textvariable=self.folder_path, width=35, font=('Arial', 8)).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Button(folder_frame, text='選択', command=self.select_folder, font=('Arial', 8), width=6).pack(side=tk.RIGHT, padx=(2,0))
 
-        # 昼の代表画像
-        tk.Label(left_frame, text='昼の代表画像:', font=('Arial', 10, 'bold')).grid(row=2, column=0, sticky='w', pady=(5,0))
-        tk.Entry(left_frame, textvariable=self.day_img_path, width=40).grid(row=3, column=0, padx=5, pady=2)
-        tk.Button(left_frame, text='選択', command=self.select_day_image).grid(row=3, column=1, padx=5, pady=2)
+        # 昼の代表画像（コンパクト化）
+        tk.Label(left_frame, text='昼の代表画像:', font=('Arial', 9, 'bold')).grid(row=2, column=0, sticky='w', pady=(3,0))
+        day_frame = tk.Frame(left_frame)
+        day_frame.grid(row=3, column=0, columnspan=2, pady=1, sticky='ew')
+        tk.Entry(day_frame, textvariable=self.day_img_path, width=35, font=('Arial', 8)).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Button(day_frame, text='選択', command=self.select_day_image, font=('Arial', 8), width=6).pack(side=tk.RIGHT, padx=(2,0))
 
-        # 夜の代表画像
-        tk.Label(left_frame, text='夜の代表画像:', font=('Arial', 10, 'bold')).grid(row=4, column=0, sticky='w', pady=(5,0))
-        tk.Entry(left_frame, textvariable=self.night_img_path, width=40).grid(row=5, column=0, padx=5, pady=2)
-        tk.Button(left_frame, text='選択', command=self.select_night_image).grid(row=5, column=1, padx=5, pady=2)
+        # 夜の代表画像（コンパクト化）
+        tk.Label(left_frame, text='夜の代表画像:', font=('Arial', 9, 'bold')).grid(row=4, column=0, sticky='w', pady=(3,0))
+        night_frame = tk.Frame(left_frame)
+        night_frame.grid(row=5, column=0, columnspan=2, pady=1, sticky='ew')
+        tk.Entry(night_frame, textvariable=self.night_img_path, width=35, font=('Arial', 8)).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Button(night_frame, text='選択', command=self.select_night_image, font=('Arial', 8), width=6).pack(side=tk.RIGHT, padx=(2,0))
 
-        # パラメータ設定（コンパクト化）
-        param_frame = tk.LabelFrame(left_frame, text='パラメータ設定', font=('Arial', 9, 'bold'))
-        param_frame.grid(row=6, column=0, columnspan=2, pady=10, padx=5, sticky='ew')
+        # 個体選択方法設定を追加
+        selection_frame = tk.LabelFrame(left_frame, text='Individual Selection Method', font=('Arial', 8, 'bold'))
+        selection_frame.grid(row=6, column=0, columnspan=2, pady=3, padx=5, sticky='ew')
+
+        selection_row = tk.Frame(selection_frame)
+        selection_row.pack(pady=2)
+        tk.Checkbutton(selection_row, text='Select Largest Particle', variable=self.select_largest, font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
+        tk.Checkbutton(selection_row, text='Constant Darkness', variable=self.constant_darkness,
+                      command=self.toggle_constant_darkness, font=('Arial', 7)).pack(side=tk.LEFT, padx=(10,1))
+
+        # パラメータ設定（さらにコンパクト化）
+        param_frame = tk.LabelFrame(left_frame, text='パラメータ設定', font=('Arial', 8, 'bold'))
+        param_frame.grid(row=7, column=0, columnspan=2, pady=3, padx=5, sticky='ew')
 
         size_frame = tk.Frame(param_frame)
-        size_frame.pack(pady=2)
-        tk.Label(size_frame, text='最小面積:', font=('Arial', 8)).pack(side=tk.LEFT, padx=2)
-        tk.Entry(size_frame, textvariable=self.min_area, width=8).pack(side=tk.LEFT)
-        tk.Label(size_frame, text='最大面積:', font=('Arial', 8)).pack(side=tk.LEFT, padx=2)
-        tk.Entry(size_frame, textvariable=self.max_area, width=8).pack(side=tk.LEFT)
+        size_frame.pack(pady=1)
+        tk.Label(size_frame, text='最小面積:', font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
+        tk.Entry(size_frame, textvariable=self.min_area, width=6, font=('Arial', 8)).pack(side=tk.LEFT)
+        tk.Label(size_frame, text='最大面積:', font=('Arial', 7)).pack(side=tk.LEFT, padx=(5,1))
+        tk.Entry(size_frame, textvariable=self.max_area, width=6, font=('Arial', 8)).pack(side=tk.LEFT)
+        tk.Button(size_frame, text='更新', command=self.update_preview,
+                 bg='lightblue', font=('Arial', 7), width=6).pack(side=tk.LEFT, padx=(5,0))
 
-        # プレビューボタンをパラメータフレーム内から移動
-        tk.Button(param_frame, text='プレビュー更新', command=self.update_preview,
-                 bg='lightblue', font=('Arial', 9)).pack(pady=5)
+        # 時間設定（コンパクト化）
+        time_frame = tk.LabelFrame(left_frame, text='時間設定', font=('Arial', 8, 'bold'))
+        time_frame.grid(row=8, column=0, columnspan=2, pady=3, padx=5, sticky='ew')
 
-        # 時間設定
-        time_frame = tk.LabelFrame(left_frame, text='時間設定', font=('Arial', 9, 'bold'))
-        time_frame.grid(row=7, column=0, columnspan=2, pady=5, padx=5, sticky='ew')
-        time_entry_frame = tk.Frame(time_frame)
-        time_entry_frame.pack(pady=5)
-        tk.Label(time_entry_frame, text='昼開始:', font=('Arial', 8)).pack(side=tk.LEFT, padx=3)
-        tk.Entry(time_entry_frame, textvariable=self.day_start_time, width=8).pack(side=tk.LEFT, padx=3)
-        tk.Label(time_entry_frame, text='夜開始:', font=('Arial', 8)).pack(side=tk.LEFT, padx=3)
-        tk.Entry(time_entry_frame, textvariable=self.night_start_time, width=8).pack(side=tk.LEFT, padx=3)
+        # 1行目：昼夜の開始時間
+        time_entry_frame1 = tk.Frame(time_frame)
+        time_entry_frame1.pack(pady=1)
+        tk.Label(time_entry_frame1, text='昼開始:', font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
+        tk.Entry(time_entry_frame1, textvariable=self.day_start_time, width=6, font=('Arial', 8)).pack(side=tk.LEFT, padx=1)
+        tk.Label(time_entry_frame1, text='夜開始:', font=('Arial', 7)).pack(side=tk.LEFT, padx=(5,1))
+        tk.Entry(time_entry_frame1, textvariable=self.night_start_time, width=6, font=('Arial', 8)).pack(side=tk.LEFT, padx=1)
+
+        # 2行目：測定開始時刻
+        time_entry_frame2 = tk.Frame(time_frame)
+        time_entry_frame2.pack(pady=1)
+        tk.Label(time_entry_frame2, text='測定開始時刻:', font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
+        tk.Entry(time_entry_frame2, textvariable=self.measurement_start_time, width=10, font=('Arial', 8)).pack(side=tk.LEFT, padx=1)
+
+        # Temporal Median Filter設定（コンパクト化）
+        temporal_frame = tk.LabelFrame(left_frame, text='Temporal Median Filter', font=('Arial', 8, 'bold'))
+        temporal_frame.grid(row=9, column=0, columnspan=2, pady=3, padx=5, sticky='ew')
+
+        # 1行にまとめる
+        temporal_row = tk.Frame(temporal_frame)
+        temporal_row.pack(pady=2)
+        tk.Checkbutton(temporal_row, text='使用', variable=self.use_temporal_median, font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
+        tk.Label(temporal_row, text='フレーム数:', font=('Arial', 7)).pack(side=tk.LEFT, padx=(5,1))
+        tk.Entry(temporal_row, textvariable=self.temporal_frames, width=5, font=('Arial', 8)).pack(side=tk.LEFT, padx=1)
+        tk.Button(temporal_row, text='背景作成', command=self.create_background,
+                 bg='lightyellow', font=('Arial', 7), width=8).pack(side=tk.LEFT, padx=(5,0))
+
+        # ステータス表示を次の行に
+        self.temporal_status_label = tk.Label(temporal_frame, text='背景未作成', font=('Arial', 6))
+        self.temporal_status_label.pack(pady=(0,2))
+
+        # 動画保存設定（コンパクト化）
+        video_frame = tk.LabelFrame(left_frame, text='動画保存設定', font=('Arial', 8, 'bold'))
+        video_frame.grid(row=10, column=0, columnspan=2, pady=3, padx=5, sticky='ew')
+
+        # 1行にまとめる
+        video_row = tk.Frame(video_frame)
+        video_row.pack(pady=2)
+        tk.Checkbutton(video_row, text='保存', variable=self.save_video, font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
+        tk.Label(video_row, text='FPS:', font=('Arial', 7)).pack(side=tk.LEFT, padx=(5,1))
+        tk.Entry(video_row, textvariable=self.video_fps, width=3, font=('Arial', 8)).pack(side=tk.LEFT, padx=1)
+        tk.Label(video_row, text='スケール:', font=('Arial', 7)).pack(side=tk.LEFT, padx=(5,1))
+        tk.Entry(video_row, textvariable=self.video_scale, width=4, font=('Arial', 8)).pack(side=tk.LEFT, padx=1)
 
         # 二値化設定（コンパクト化）
-        binarize_frame = tk.LabelFrame(left_frame, text='二値化設定', font=('Arial', 9, 'bold'))
-        binarize_frame.grid(row=8, column=0, columnspan=2, pady=5, padx=5, sticky='ew')
+        binarize_frame = tk.LabelFrame(left_frame, text='二値化設定', font=('Arial', 8, 'bold'))
+        binarize_frame.grid(row=11, column=0, columnspan=2, pady=3, padx=5, sticky='ew')
 
-        # 1列目
-        tk.Label(binarize_frame, text='メソッド:', font=('Arial', 8)).grid(row=0, column=0, padx=3, pady=1, sticky='w')
-        ttk.Combobox(binarize_frame, textvariable=self.binarize_method, values=['adaptive', 'relative', 'fixed'], state='readonly', width=8).grid(row=0, column=1, padx=3, pady=1)
-        tk.Label(binarize_frame, text='相対閾値:', font=('Arial', 8)).grid(row=1, column=0, padx=3, pady=1, sticky='w')
-        tk.Entry(binarize_frame, textvariable=self.relative_thresh, width=8).grid(row=1, column=1, padx=3, pady=1)
-        tk.Label(binarize_frame, text='ブロックサイズ:', font=('Arial', 8)).grid(row=2, column=0, padx=3, pady=1, sticky='w')
-        tk.Entry(binarize_frame, textvariable=self.block_size, width=8).grid(row=2, column=1, padx=3, pady=1)
+        # 3列に分けてよりコンパクトに
+        tk.Label(binarize_frame, text='メソッド:', font=('Arial', 7)).grid(row=0, column=0, padx=1, pady=1, sticky='w')
+        ttk.Combobox(binarize_frame, textvariable=self.binarize_method, values=['adaptive', 'relative', 'fixed'], state='readonly', width=6, font=('Arial', 7)).grid(row=0, column=1, padx=1, pady=1)
+        tk.Label(binarize_frame, text='定数C:', font=('Arial', 7)).grid(row=0, column=2, padx=(5,1), pady=1, sticky='w')
+        tk.Entry(binarize_frame, textvariable=self.c_value, width=5, font=('Arial', 8)).grid(row=0, column=3, padx=1, pady=1)
+        tk.Label(binarize_frame, text='BG除去:', font=('Arial', 7)).grid(row=0, column=4, padx=(5,1), pady=1, sticky='w')
+        ttk.Combobox(binarize_frame, textvariable=self.use_bg_removal, values=[True, False], state='readonly', width=4, font=('Arial', 7)).grid(row=0, column=5, padx=1, pady=1)
 
-        # 2列目
-        tk.Label(binarize_frame, text='定数C:', font=('Arial', 8)).grid(row=0, column=2, padx=(10,3), pady=1, sticky='w')
-        tk.Entry(binarize_frame, textvariable=self.c_value, width=8).grid(row=0, column=3, padx=3, pady=1)
-        tk.Label(binarize_frame, text='BG除去:', font=('Arial', 8)).grid(row=1, column=2, padx=(10,3), pady=1, sticky='w')
-        ttk.Combobox(binarize_frame, textvariable=self.use_bg_removal, values=[True, False], state='readonly', width=6).grid(row=1, column=3, padx=3, pady=1)
-        tk.Label(binarize_frame, text='BGカーネル:', font=('Arial', 8)).grid(row=2, column=2, padx=(10,3), pady=1, sticky='w')
-        tk.Entry(binarize_frame, textvariable=self.bg_kernel_size, width=8).grid(row=2, column=3, padx=3, pady=1)
+        tk.Label(binarize_frame, text='相対閾値:', font=('Arial', 7)).grid(row=1, column=0, padx=1, pady=1, sticky='w')
+        tk.Entry(binarize_frame, textvariable=self.relative_thresh, width=6, font=('Arial', 8)).grid(row=1, column=1, padx=1, pady=1)
+        tk.Label(binarize_frame, text='ブロック:', font=('Arial', 7)).grid(row=1, column=2, padx=(5,1), pady=1, sticky='w')
+        tk.Entry(binarize_frame, textvariable=self.block_size, width=5, font=('Arial', 8)).grid(row=1, column=3, padx=1, pady=1)
+        tk.Label(binarize_frame, text='BGカーネル:', font=('Arial', 7)).grid(row=1, column=4, padx=(5,1), pady=1, sticky='w')
+        tk.Entry(binarize_frame, textvariable=self.bg_kernel_size, width=4, font=('Arial', 8)).grid(row=1, column=5, padx=1, pady=1)
 
-        # ROI設定（コンパクト化）
-        roi_frame = tk.LabelFrame(left_frame, text='ROI設定', font=('Arial', 9, 'bold'))
-        roi_frame.grid(row=9, column=0, columnspan=2, pady=5, padx=5, sticky='ew')
+        # ROI設定（さらにコンパクト化）
+        roi_frame = tk.LabelFrame(left_frame, text='ROI設定', font=('Arial', 8, 'bold'))
+        roi_frame.grid(row=12, column=0, columnspan=2, pady=3, padx=5, sticky='ew')
 
-        tk.Checkbutton(roi_frame, text='ROIを使用', variable=self.roi_active,
-                      command=self.toggle_roi, font=('Arial', 8)).grid(row=0, column=0, columnspan=2, pady=2)
+        roi_control_frame = tk.Frame(roi_frame)
+        roi_control_frame.pack(pady=2)
+        tk.Checkbutton(roi_control_frame, text='ROI使用', variable=self.roi_active,
+                      command=self.toggle_roi, font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
+        tk.Button(roi_control_frame, text='設定', command=self.set_roi_mode,
+                 bg='orange', font=('Arial', 7), width=6).pack(side=tk.LEFT, padx=2)
+        tk.Button(roi_control_frame, text='クリア', command=self.clear_roi,
+                 bg='lightgray', font=('Arial', 7), width=6).pack(side=tk.LEFT, padx=1)
 
-        roi_button_frame = tk.Frame(roi_frame)
-        roi_button_frame.grid(row=1, column=0, columnspan=2, pady=2)
+        self.roi_info_label = tk.Label(roi_frame, text='ROI未設定', font=('Arial', 6))
+        self.roi_info_label.pack(pady=(0,2))
 
-        tk.Button(roi_button_frame, text='ROI設定', command=self.set_roi_mode,
-                 bg='orange', font=('Arial', 8), width=8).pack(side=tk.LEFT, padx=1)
-        tk.Button(roi_button_frame, text='ROIクリア', command=self.clear_roi,
-                 bg='lightgray', font=('Arial', 8), width=8).pack(side=tk.LEFT, padx=1)
+        # コントラスト調整設定を追加
+        contrast_frame = tk.LabelFrame(left_frame, text='コントラスト調整', font=('Arial', 8, 'bold'))
+        contrast_frame.grid(row=13, column=0, columnspan=2, pady=3, padx=5, sticky='ew')
 
-        self.roi_info_label = tk.Label(roi_frame, text='ROI未設定', font=('Arial', 7))
-        self.roi_info_label.grid(row=2, column=0, columnspan=2, pady=1)
+        # 1行目：基本設定
+        contrast_row1 = tk.Frame(contrast_frame)
+        contrast_row1.pack(pady=2)
+        tk.Checkbutton(contrast_row1, text='使用', variable=self.use_contrast_enhancement,
+                      command=self.update_preview, font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
+        tk.Label(contrast_row1, text='倍率:', font=('Arial', 7)).pack(side=tk.LEFT, padx=(5,1))
+        tk.Entry(contrast_row1, textvariable=self.contrast_alpha, width=4, font=('Arial', 8)).pack(side=tk.LEFT, padx=1)
+        tk.Label(contrast_row1, text='明度:', font=('Arial', 7)).pack(side=tk.LEFT, padx=(5,1))
+        tk.Entry(contrast_row1, textvariable=self.brightness_beta, width=4, font=('Arial', 8)).pack(side=tk.LEFT, padx=1)
+
+        # 2行目：CLAHE設定
+        contrast_row2 = tk.Frame(contrast_frame)
+        contrast_row2.pack(pady=1)
+        tk.Checkbutton(contrast_row2, text='CLAHE', variable=self.use_clahe,
+                      command=self.update_preview, font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
+        tk.Label(contrast_row2, text='制限:', font=('Arial', 7)).pack(side=tk.LEFT, padx=(5,1))
+        tk.Entry(contrast_row2, textvariable=self.clahe_clip_limit, width=4, font=('Arial', 8)).pack(side=tk.LEFT, padx=1)
+        tk.Button(contrast_row2, text='プレビュー更新', command=self.update_preview,
+                 bg='lightcyan', font=('Arial', 7), width=10).pack(side=tk.LEFT, padx=(5,0))
 
         # メインボタン（コンパクト化）
         button_frame = tk.Frame(left_frame)
-        button_frame.grid(row=10, column=0, columnspan=2, pady=5)
+        button_frame.grid(row=14, column=0, columnspan=2, pady=3)
+
+        # 設定保存・ロードボタンを追加
+        config_frame = tk.Frame(button_frame)
+        config_frame.pack(pady=1)
+        tk.Button(config_frame, text='設定保存', command=self.save_config,
+                 bg='lightblue', font=('Arial', 8), width=8).pack(side=tk.LEFT, padx=1)
+        tk.Button(config_frame, text='設定ロード', command=self.load_config,
+                 bg='lightyellow', font=('Arial', 8), width=8).pack(side=tk.LEFT, padx=1)
 
         tk.Button(button_frame, text='解析開始', command=self.start_analysis,
-                 bg='lightgreen', font=('Arial', 10, 'bold'), width=12).pack(pady=2)
+                 bg='lightgreen', font=('Arial', 10, 'bold'), width=10, height=2).pack(pady=1)
         tk.Button(button_frame, text='終了', command=self.root.quit,
-                 bg='lightcoral', font=('Arial', 10), width=12).pack(pady=2)
+                 bg='lightcoral', font=('Arial', 9), width=10).pack(pady=1)
 
         # 右側：プレビューパネル
         right_frame = tk.Frame(main_frame)
         right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
 
         # プレビューエリア
-        preview_frame = tk.LabelFrame(right_frame, text='検出プレビュー', font=('Arial', 10, 'bold'))
-        preview_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        preview_frame = tk.LabelFrame(right_frame, text='検出プレビュー', font=('Arial', 9, 'bold'))
+        preview_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 5))
 
         # タブ
         self.notebook = ttk.Notebook(preview_frame)
@@ -292,8 +537,10 @@ class AnimalDetectorGUI:
 
         self.day_frame = tk.Frame(self.notebook)
         self.night_frame = tk.Frame(self.notebook)
+        self.bg_preview_frame = tk.Frame(self.notebook)  # 背景プレビュー用タブを追加
         self.notebook.add(self.day_frame, text='昼画像プレビュー')
         self.notebook.add(self.night_frame, text='夜画像プレビュー')
+        self.notebook.add(self.bg_preview_frame, text='背景プレビュー')
 
         # 昼画像プレビュー
         self.day_canvas = tk.Canvas(self.day_frame, bg='white', width=300, height=200)
@@ -303,11 +550,24 @@ class AnimalDetectorGUI:
         self.night_canvas = tk.Canvas(self.night_frame, bg='white', width=300, height=200)
         self.night_canvas.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
+        # 背景プレビュー（Temporal Median Filter効果確認用）
+        bg_preview_control_frame = tk.Frame(self.bg_preview_frame)
+        bg_preview_control_frame.pack(pady=2)
+        tk.Button(bg_preview_control_frame, text='元画像', command=lambda: self.show_bg_preview('original'),
+                 bg='lightblue', font=('Arial', 8), width=8).pack(side=tk.LEFT, padx=1)
+        tk.Button(bg_preview_control_frame, text='背景画像', command=lambda: self.show_bg_preview('background'),
+                 bg='lightyellow', font=('Arial', 8), width=8).pack(side=tk.LEFT, padx=1)
+        tk.Button(bg_preview_control_frame, text='減算結果', command=lambda: self.show_bg_preview('subtracted'),
+                 bg='lightgreen', font=('Arial', 8), width=8).pack(side=tk.LEFT, padx=1)
+
+        self.bg_canvas = tk.Canvas(self.bg_preview_frame, bg='white', width=300, height=200)
+        self.bg_canvas.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
         # 出力テキストエリア
-        output_frame = tk.LabelFrame(right_frame, text='解析結果', font=('Arial', 10, 'bold'))
+        output_frame = tk.LabelFrame(right_frame, text='解析結果', font=('Arial', 9, 'bold'))
         output_frame.pack(fill=tk.BOTH, expand=True)
 
-        self.output_text = scrolledtext.ScrolledText(output_frame, width=50, height=10)
+        self.output_text = scrolledtext.ScrolledText(output_frame, width=50, height=8, font=('Arial', 8))
         self.output_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
     def select_folder(self):
@@ -367,6 +627,21 @@ class AnimalDetectorGUI:
             x1, y1, x2, y2 = self.roi_coordinates
             roi_img = image[y1:y2, x1:x2]
             roi_offset_x, roi_offset_y = x1, y1
+
+        # コントラスト調整を適用
+        if self.use_contrast_enhancement.get() or self.use_clahe.get():
+            try:
+                alpha = self.contrast_alpha.get()
+                beta = self.brightness_beta.get()
+                clip_limit = self.clahe_clip_limit.get()
+                roi_img = enhance_contrast(roi_img, 
+                                         use_contrast=self.use_contrast_enhancement.get(),
+                                         alpha=alpha, beta=beta,
+                                         use_clahe=self.use_clahe.get(),
+                                         clip_limit=clip_limit)
+            except ValueError:
+                # パラメータエラーの場合はコントラスト調整をスキップ
+                pass
 
         # 画像を適切なサイズにリサイズ
         resized_img = self.resize_image_for_canvas(roi_img)
@@ -439,10 +714,11 @@ class AnimalDetectorGUI:
 
         # 検出情報をキャンバスに表示
         roi_status = " (ROI)" if self.roi_active.get() and self.roi_coordinates else ""
+        contrast_status = " +Contrast" if self.use_contrast_enhancement.get() or self.use_clahe.get() else ""
         if results:
-            info_text = f"{time_type}{roi_status}: {len(results)}個検出 (面積: {results[0]['area']:.0f})"
+            info_text = f"{time_type}{roi_status}{contrast_status}: {len(results)}個検出 (面積: {results[0]['area']:.0f})"
         else:
-            info_text = f"{time_type}{roi_status}: {len(results)}個検出"
+            info_text = f"{time_type}{roi_status}{contrast_status}: {len(results)}個検出"
         canvas.create_text(10, 10, anchor=tk.NW, text=info_text,
                           fill="blue", font=("Arial", 10, "bold"))
 
@@ -451,10 +727,94 @@ class AnimalDetectorGUI:
         self.output_text.see(tk.END)
         self.root.update()
 
+    def create_background(self):
+        """Temporal median filterで背景を作成"""
+        if not self.folder_path.get():
+            messagebox.showerror('エラー', '画像フォルダを選択してください')
+            return
+
+        try:
+            num_frames = self.temporal_frames.get()
+            if num_frames <= 0:
+                messagebox.showerror('エラー', 'フレーム数は正の整数で入力してください')
+                return
+        except ValueError:
+            messagebox.showerror('エラー', 'フレーム数は整数で入力してください')
+            return
+
+        self.log_output('--- 背景作成開始 ---')
+
+        # 画像ファイルのパスリストを作成
+        image_files = sorted([f for f in os.listdir(self.folder_path.get())
+                             if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp'))])
+        image_paths = [os.path.join(self.folder_path.get(), f) for f in image_files]
+
+        if not image_paths:
+            messagebox.showerror('エラー', '画像ファイルが見つかりません')
+            return
+
+        self.log_output(f'全{len(image_paths)}枚の画像から{num_frames}フレームを選択して背景作成中...')
+
+        # 別スレッドで背景作成
+        def create_bg_thread():
+            try:
+                background = create_temporal_median_background(image_paths, num_frames)
+                if background is not None:
+                    self.temporal_background = background
+                    self.root.after(0, lambda: self.temporal_status_label.config(text='背景作成完了'))
+                    self.root.after(0, lambda: self.log_output('背景作成が完了しました'))
+                else:
+                    self.root.after(0, lambda: self.temporal_status_label.config(text='背景作成失敗'))
+                    self.root.after(0, lambda: self.log_output('背景作成に失敗しました'))
+            except Exception as e:
+                self.root.after(0, lambda: self.temporal_status_label.config(text='背景作成エラー'))
+                self.root.after(0, lambda: self.log_output(f'背景作成中にエラーが発生しました: {e}'))
+
+        threading.Thread(target=create_bg_thread, daemon=True).start()
+        self.temporal_status_label.config(text='背景作成中...')
+
     def run_analysis(self, folder_path, min_area, max_area, binarize_method, relative_thresh, block_size, c_value, use_bg_removal, bg_kernel_size, roi_active, roi_coordinates):
         self.log_output('--- 解析開始 ---')
+
+        # Temporal median filterが有効で背景が作成されていない場合は確認
+        if self.use_temporal_median.get() and self.temporal_background is None:
+            self.log_output('警告: Temporal median filterが有効ですが、背景が作成されていません。')
+            self.log_output('先に「背景作成」ボタンで背景を作成するか、Temporal median filterを無効にしてください。')
+            return
+
         image_files = sorted([f for f in os.listdir(folder_path) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp'))])
         results_list = []
+
+        # 動画保存の準備
+        video_writer = None
+        if self.save_video.get():
+            try:
+                fps = self.video_fps.get()
+                scale = self.video_scale.get()
+                video_path = os.path.join(folder_path, 'detection_video.avi')
+
+                # 最初の画像から動画のサイズを決定
+                if image_files:
+                    first_img = cv2.imread(os.path.join(folder_path, image_files[0]))
+                    if first_img is not None:
+                        # ROI適用後のサイズを取得
+                        if roi_active and roi_coordinates:
+                            x1, y1, x2, y2 = roi_coordinates
+                            first_img = first_img[y1:y2, x1:x2]
+
+                        # スケール適用
+                        original_h, original_w = first_img.shape[:2]
+                        new_w = int(original_w * scale)
+                        new_h = int(original_h * scale)
+
+                        # 動画ライターを初期化
+                        fourcc = cv2.VideoWriter_fourcc(*'XVID')
+                        video_writer = cv2.VideoWriter(video_path, fourcc, fps, (new_w, new_h))
+                        self.log_output(f'動画保存を開始します: {video_path} ({new_w}x{new_h}, {fps}fps)')
+
+            except Exception as e:
+                self.log_output(f'動画保存の初期化に失敗しました: {e}')
+                video_writer = None
 
         total_files = len(image_files)
         for i, filename in enumerate(image_files):
@@ -472,6 +832,34 @@ class AnimalDetectorGUI:
                 roi_img = image[y1:y2, x1:x2]
                 roi_offset_x, roi_offset_y = x1, y1
 
+            # Temporal median filterを適用（有効な場合）
+            if self.use_temporal_median.get() and self.temporal_background is not None:
+                # ROIが適用されている場合は、背景もROIでクリッピング
+                bg_roi = self.temporal_background
+                if roi_active and roi_coordinates:
+                    x1, y1, x2, y2 = roi_coordinates
+                    bg_roi = self.temporal_background[y1:y2, x1:x2]
+
+                # 背景引き算を適用
+                processed_img = apply_temporal_median_subtraction(roi_img, bg_roi)
+                # 3チャンネルに変換して既存の処理と互換性を保つ
+                roi_img = cv2.cvtColor(processed_img, cv2.COLOR_GRAY2BGR)
+
+            # コントラスト調整を適用（有効な場合）
+            if self.use_contrast_enhancement.get() or self.use_clahe.get():
+                try:
+                    alpha = self.contrast_alpha.get()
+                    beta = self.brightness_beta.get()
+                    clip_limit = self.clahe_clip_limit.get()
+                    roi_img = enhance_contrast(roi_img, 
+                                             use_contrast=self.use_contrast_enhancement.get(),
+                                             alpha=alpha, beta=beta,
+                                             use_clahe=self.use_clahe.get(),
+                                             clip_limit=clip_limit)
+                except ValueError:
+                    # パラメータエラーの場合はコントラスト調整をスキップ
+                    pass
+
             # 二値化
             binary = binarize(roi_img,
                              method=binarize_method,
@@ -482,7 +870,45 @@ class AnimalDetectorGUI:
                              bg_kernel_size=bg_kernel_size)
 
             # 解析
-            results, _ = analyze(binary, min_area, max_area, True, 1.0, roi_offset_x, roi_offset_y)
+            results, contours = analyze(binary, min_area, max_area, True, 1.0, roi_offset_x, roi_offset_y)
+
+            # 動画フレーム作成（動画保存が有効な場合）
+            if video_writer is not None:
+                try:
+                    # 検出結果を描画した画像を作成
+                    video_frame = roi_img.copy()
+
+                    # 輪郭を描画
+                    cv2.drawContours(video_frame, contours, -1, (0, 255, 0), 2)
+
+                    # 重心を描画
+                    for result in results:
+                        # 座標をROI相対座標に変換
+                        cx = int(result['centroid_x'] - roi_offset_x)
+                        cy = int(result['centroid_y'] - roi_offset_y)
+                        cv2.circle(video_frame, (cx, cy), 5, (0, 0, 255), -1)
+
+                        # 面積情報をテキストで表示
+                        text = f"Area: {result['area']:.0f}"
+                        cv2.putText(video_frame, text, (cx + 10, cy - 10),
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+                    # フレーム番号を表示
+                    cv2.putText(video_frame, f"Frame: {i+1}/{total_files}", (10, 30),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+
+                    # スケール適用
+                    scale = self.video_scale.get()
+                    if scale != 1.0:
+                        h, w = video_frame.shape[:2]
+                        new_w, new_h = int(w * scale), int(h * scale)
+                        video_frame = cv2.resize(video_frame, (new_w, new_h))
+
+                    # 動画に書き込み
+                    video_writer.write(video_frame)
+
+                except Exception as e:
+                    self.log_output(f'動画フレーム作成エラー（フレーム{i+1}）: {e}')
 
             if results:
                 result = results[0]
@@ -493,10 +919,14 @@ class AnimalDetectorGUI:
                 results_list.append({'filename': filename, 'centroid_x': np.nan, 'centroid_y': np.nan,
                                      'major_axis': np.nan, 'minor_axis': np.nan, 'circularity': np.nan, 'area': 0})
 
-
             # 進捗をログに出力
             if (i + 1) % 10 == 0 or (i + 1) == total_files:
                 self.log_output(f'進捗: {i + 1}/{total_files} ファイル処理完了')
+
+        # 動画ライターを閉じる
+        if video_writer is not None:
+            video_writer.release()
+            self.log_output('動画保存が完了しました')
 
         df = pd.DataFrame(results_list)
         output_path = os.path.join(folder_path, 'analysis_results.csv')
@@ -521,32 +951,32 @@ class AnimalDetectorGUI:
 
     def plot_results(self, df):
         if df.empty:
-            self.log_output("解析結果が空のため、グラフは作成されません。")
+            self.log_output("Analysis results are empty. No graph will be created.")
             return
 
         timelog_path = os.path.join(self.folder_path.get(), 'timelog.txt')
         if not os.path.exists(timelog_path):
-            self.log_output(f"timelog.txtが見つかりません: {timelog_path}")
-            messagebox.showwarning("警告", "timelog.txt が見つかりません。グラフは作成されません。")
+            self.log_output(f"timelog.txt not found: {timelog_path}")
+            messagebox.showwarning("Warning", "timelog.txt not found. No graph will be created.")
             return
 
         try:
-            # timelog.txtを読み込み（時刻のみの形式に対応）
+            # Read timelog.txt (supporting time-only format)
             with open(timelog_path, 'r') as f:
                 time_lines = f.readlines()
 
-            # 時刻データを処理
+            # Process time data
             timestamps = []
             filenames = []
 
-            # ソートされた画像ファイル名を取得
+            # Get sorted image filenames
             image_files = sorted([f for f in os.listdir(self.folder_path.get())
                                 if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp'))])
 
             for i, time_line in enumerate(time_lines):
                 time_str = time_line.strip()
                 if time_str and i < len(image_files):
-                    # 今日の日付と時刻を組み合わせて完全なdatetimeを作成
+                    # Combine today's date with time to create complete datetime
                     from datetime import date
                     today = date.today()
                     full_datetime_str = f"{today} {time_str}"
@@ -557,63 +987,101 @@ class AnimalDetectorGUI:
                     except:
                         continue
 
-            # DataFrameを作成
+            # Create DataFrame
             time_df = pd.DataFrame({
                 'filename': filenames,
                 'datetime': timestamps
             })
 
-            merged_df = pd.merge(df, time_df[['filename', 'datetime']], on='filename', how='left')
+            merged_df = pd.merge(time_df, df, on='filename', how='right')
             if 'datetime' not in merged_df.columns or merged_df['datetime'].isnull().all():
-                self.log_output("日時の結合に失敗しました。ファイル名が一致しているか確認してください。")
+                self.log_output("Failed to merge datetime data. Please check if filenames match.")
                 return
 
             merged_df.sort_values('datetime', inplace=True)
-            merged_df.dropna(subset=['datetime'], inplace=True) # 日時がないデータは除外
+            merged_df.dropna(subset=['datetime'], inplace=True)  # Remove data without datetime
 
-            day_start_time = datetime.strptime(self.day_start_time.get(), '%H:%M').time()
-            night_start_time = datetime.strptime(self.night_start_time.get(), '%H:%M').time()
-
+            # Create graph window
             graph_window = tk.Toplevel(self.root)
-            graph_window.title("解析結果グラフ")
-            graph_window.geometry("1000x600")
+            graph_window.title("Analysis Results - Animal Activity")
+            graph_window.geometry("1200x700")
 
-            fig, ax = plt.subplots(figsize=(10, 6))
+            # Create matplotlib figure with English labels
+            fig, ax = plt.subplots(figsize=(12, 7))
 
-            # 夜の時間帯をグレー表示
-            if not merged_df.empty:
-                unique_dates = merged_df['datetime'].dt.date.unique()
-                for d in unique_dates:
-                    night_start = datetime.combine(d, night_start_time)
-                    # 夜の開始時間が昼の開始時間より遅い場合（通常の昼夜）
-                    if night_start_time > day_start_time:
-                        day_end = datetime.combine(d + pd.Timedelta(days=1), day_start_time)
-                    # 日をまたぐ場合（例：夜19:00～朝7:00）
-                    else:
-                        day_end = datetime.combine(d, day_start_time)
+            # Handle different conditions
+            if self.constant_darkness.get():
+                # Constant darkness condition - no day/night shading
+                ax.plot(merged_df['datetime'], merged_df['area'],
+                       marker='.', linestyle='-', markersize=3,
+                       color='blue', linewidth=1, label='Animal Area')
+                ax.set_title("Animal Activity under Constant Darkness", fontsize=14, fontweight='bold')
+                # Add text annotation for constant darkness
+                ax.text(0.02, 0.98, 'Constant Darkness', transform=ax.transAxes,
+                       fontsize=12, verticalalignment='top',
+                       bbox=dict(boxstyle='round', facecolor='black', alpha=0.7, edgecolor='white'),
+                       color='white', fontweight='bold')
+            else:
+                # Normal light/dark cycle
+                day_start_time = datetime.strptime(self.day_start_time.get(), '%H:%M').time()
+                night_start_time = datetime.strptime(self.night_start_time.get(), '%H:%M').time()
 
-                    ax.axvspan(night_start, day_end, facecolor='gray', alpha=0.2)
+                # Add day/night shading
+                if not merged_df.empty:
+                    unique_dates = merged_df['datetime'].dt.date.unique()
+                    for d in unique_dates:
+                        night_start = datetime.combine(d, night_start_time)
+                        # Handle different day/night patterns
+                        if night_start_time > day_start_time:
+                            day_end = datetime.combine(d + pd.Timedelta(days=1), day_start_time)
+                        else:
+                            day_end = datetime.combine(d, day_start_time)
 
+                        ax.axvspan(night_start, day_end, facecolor='gray', alpha=0.2, label='Dark Period' if d == unique_dates[0] else "")
 
-            ax.plot(merged_df['datetime'], merged_df['area'], marker='.', linestyle='-', markersize=4, label='面積 (Area)')
-            ax.set_xlabel("日時")
-            ax.set_ylabel("面積")
-            ax.set_title("動物の面積の時系列変化")
-            ax.legend()
-            ax.grid(True)
+                ax.plot(merged_df['datetime'], merged_df['area'],
+                       marker='.', linestyle='-', markersize=3,
+                       color='blue', linewidth=1, label='Animal Area')
+                ax.set_title("Animal Activity over Time", fontsize=14, fontweight='bold')
 
-            ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M'))
-            plt.setp(ax.get_xticklabels(), rotation=30, ha="right")
+            # Set English axis labels and formatting
+            ax.set_xlabel("Time", fontsize=12)
+            ax.set_ylabel("Area (pixels²)", fontsize=12)
+            ax.legend(fontsize=10)
+            ax.grid(True, alpha=0.3)
 
+            # Format x-axis
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d %H:%M'))
+            plt.setp(ax.get_xticklabels(), rotation=45, ha="right", fontsize=10)
+
+            # Add statistics text box
+            valid_areas = merged_df['area'][merged_df['area'] > 0]
+            if not valid_areas.empty:
+                stats_text = f'Statistics:\nMean: {valid_areas.mean():.1f}\nStd: {valid_areas.std():.1f}\nMax: {valid_areas.max():.1f}\nMin: {valid_areas.min():.1f}'
+                ax.text(0.02, 0.02, stats_text, transform=ax.transAxes,
+                       fontsize=9, verticalalignment='bottom',
+                       bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+
+            # Embed plot in tkinter window
             canvas = FigureCanvasTkAgg(fig, master=graph_window)
             canvas.draw()
             canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=1)
 
+            # Add toolbar for zooming/panning
+            from matplotlib.backends.backend_tkagg import NavigationToolbar2Tk
+            toolbar = NavigationToolbar2Tk(canvas, graph_window)
+            toolbar.update()
+
             plt.tight_layout()
 
+            # Save graph as PNG
+            graph_save_path = os.path.join(self.folder_path.get(), 'activity_graph.png')
+            fig.savefig(graph_save_path, dpi=300, bbox_inches='tight')
+            self.log_output(f'Graph saved as: {graph_save_path}')
+
         except Exception as e:
-            self.log_output(f"グラフ作成中にエラーが発生しました: {e}")
-            messagebox.showerror("エラー", f"グラフ作成中にエラーが発生しました:\n{e}")
+            self.log_output(f"Error creating graph: {e}")
+            messagebox.showerror("Error", f"Error creating graph:\n{e}")
 
     # ROI関連メソッド
     def toggle_roi(self):
@@ -621,6 +1089,13 @@ class AnimalDetectorGUI:
             self.log_output('ROI機能を有効にしました')
         else:
             self.log_output('ROI機能を無効にしました')
+        self.update_preview()
+
+    def toggle_constant_darkness(self):
+        if self.constant_darkness.get():
+            self.log_output('Constant Darkness mode enabled')
+        else:
+            self.log_output('Constant Darkness mode disabled')
         self.update_preview()
 
     def set_roi_mode(self):
@@ -734,7 +1209,247 @@ class AnimalDetectorGUI:
             self.roi_coordinates
         ), daemon=True).start()
 
-if __name__ == "__main__":
-    root = tk.Tk()
-    app = AnimalDetectorGUI(root)
-    root.mainloop()
+    def show_bg_preview(self, mode):
+        """背景プレビューを表示（Temporal Median Filter効果確認用）"""
+        if not self.day_img_path.get() or not os.path.exists(self.day_img_path.get()):
+            messagebox.showwarning('警告', '昼の代表画像を選択してください')
+            return
+
+        if mode in ['background', 'subtracted'] and self.temporal_background is None:
+            messagebox.showwarning('警告', '先に背景を作成してください')
+            return
+
+        # 昼の代表画像を読み込み
+        image = cv2.imread(self.day_img_path.get())
+        if image is None:
+            return
+
+        # ROI適用
+        roi_img = image
+        if self.roi_active.get() and self.roi_coordinates:
+            x1, y1, x2, y2 = self.roi_coordinates
+            roi_img = image[y1:y2, x1:x2]
+
+        try:
+            if mode == 'original':
+                # 元画像を表示
+                display_img = roi_img.copy()
+                title = "元画像"
+            elif mode == 'background':
+                # 背景画像を表示
+                bg_roi = self.temporal_background
+                if self.roi_active.get() and self.roi_coordinates:
+                    x1, y1, x2, y2 = self.roi_coordinates
+                    bg_roi = self.temporal_background[y1:y2, x1:x2]
+
+                # グレースケールをBGRに変換
+                display_img = cv2.cvtColor(bg_roi, cv2.COLOR_GRAY2BGR)
+                title = "背景画像（Temporal Median）"
+            elif mode == 'subtracted':
+                # 減算結果を表示
+                bg_roi = self.temporal_background
+                if self.roi_active.get() and self.roi_coordinates:
+                    x1, y1, x2, y2 = self.roi_coordinates
+                    bg_roi = self.temporal_background[y1:y2, x1:x2]
+
+                # 背景減算を適用
+                subtracted = apply_temporal_median_subtraction(roi_img, bg_roi)
+                display_img = cv2.cvtColor(subtracted, cv2.COLOR_GRAY2BGR)
+                title = "背景減算結果"
+
+            # プレビューサイズに調整
+            resized_img = self.resize_image_for_canvas(display_img)
+
+            # RGB変換
+            preview_img_rgb = cv2.cvtColor(resized_img, cv2.COLOR_BGR2RGB)
+
+            # PIL Imageに変換
+            pil_img = Image.fromarray(preview_img_rgb)
+            photo = ImageTk.PhotoImage(pil_img)
+
+            # キャンバスに描画
+            self.bg_canvas.delete("all")
+
+            # 中央配置
+            canvas_width = self.bg_canvas.winfo_width() if self.bg_canvas.winfo_width() > 1 else 300
+            canvas_height = self.bg_canvas.winfo_height() if self.bg_canvas.winfo_height() > 1 else 200
+            img_w, img_h = resized_img.shape[1], resized_img.shape[0]
+            x = (canvas_width - img_w) // 2
+            y = (canvas_height - img_h) // 2
+
+            self.bg_canvas.create_image(x, y, anchor=tk.NW, image=photo)
+            self.bg_canvas.image = photo  # 参照を保持
+
+            # タイトルを表示
+            self.bg_canvas.create_text(10, 10, anchor=tk.NW, text=title,
+                                      fill="blue", font=("Arial", 10, "bold"))
+
+            self.log_output(f'背景プレビュー: {title}を表示しました')
+
+        except Exception as e:
+            self.log_output(f'背景プレビューエラー: {e}')
+            messagebox.showerror('エラー', f'背景プレビューでエラーが発生しました: {e}')
+
+    def save_config(self):
+        """設定をファイルに保存"""
+        config = {
+            'folder_path': self.folder_path.get(),
+            'day_img_path': self.day_img_path.get(),
+            'night_img_path': self.night_img_path.get(),
+            'min_area': self.min_area.get(),
+            'max_area': self.max_area.get(),
+            'binarize_method': self.binarize_method.get(),
+            'relative_thresh': self.relative_thresh.get(),
+            'block_size': self.block_size.get(),
+            'c_value': self.c_value.get(),
+            'use_bg_removal': self.use_bg_removal.get(),
+            'bg_kernel_size': self.bg_kernel_size.get(),
+            'use_temporal_median': self.use_temporal_median.get(),
+            'temporal_frames': self.temporal_frames.get(),
+            'save_video': self.save_video.get(),
+            'video_fps': self.video_fps.get(),
+            'video_scale': self.video_scale.get(),
+            'day_start_time': self.day_start_time.get(),
+            'night_start_time': self.night_start_time.get(),
+            'measurement_start_time': self.measurement_start_time.get(),
+            'roi_coordinates': self.roi_coordinates,
+            # コントラスト調整設定を追加
+            'use_contrast_enhancement': self.use_contrast_enhancement.get(),
+            'contrast_alpha': self.contrast_alpha.get(),
+            'brightness_beta': self.brightness_beta.get(),
+            'use_clahe': self.use_clahe.get(),
+            'clahe_clip_limit': self.clahe_clip_limit.get()
+        }
+
+        # JSONファイルに保存
+        file_path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON files", "*.json")])
+        if file_path:
+            with open(file_path, 'w') as f:
+                json.dump(config, f, ensure_ascii=False, indent=4)
+            self.log_output(f'設定を保存しました: {file_path}')
+
+    def load_config(self):
+        """設定をファイルからロード"""
+        file_path = filedialog.askopenfilename(filetypes=[("JSON files", "*.json")])
+        if not file_path:
+            return
+
+        with open(file_path, 'r') as f:
+            config = json.load(f)
+
+        # 設定を反映
+        self.folder_path.set(config.get('folder_path', ''))
+        self.day_img_path.set(config.get('day_img_path', ''))
+        self.night_img_path.set(config.get('night_img_path', ''))
+        self.min_area.set(config.get('min_area', '100'))
+        self.max_area.set(config.get('max_area', '10000'))
+        self.binarize_method.set(config.get('binarize_method', 'adaptive'))
+        self.relative_thresh.set(config.get('relative_thresh', 0.15))
+        self.block_size.set(config.get('block_size', 15))
+        self.c_value.set(config.get('c_value', 8))
+        self.use_bg_removal.set(config.get('use_bg_removal', False))
+        self.bg_kernel_size.set(config.get('bg_kernel_size', 31))
+        self.use_temporal_median.set(config.get('use_temporal_median', False))
+        self.temporal_frames.set(config.get('temporal_frames', 100))
+        self.save_video.set(config.get('save_video', False))
+        self.video_fps.set(config.get('video_fps', 10))
+        self.video_scale.set(config.get('video_scale', 0.5))
+        self.day_start_time.set(config.get('day_start_time', '07:00'))
+        self.night_start_time.set(config.get('night_start_time', '19:00'))
+        self.measurement_start_time.set(config.get('measurement_start_time', '09:00:00'))
+        self.roi_coordinates = config.get('roi_coordinates', None)
+
+        # コントラスト調整設定をロード
+        self.use_contrast_enhancement.set(config.get('use_contrast_enhancement', False))
+        self.contrast_alpha.set(config.get('contrast_alpha', 1.5))
+        self.brightness_beta.set(config.get('brightness_beta', 0))
+        self.use_clahe.set(config.get('use_clahe', False))
+        self.clahe_clip_limit.set(config.get('clahe_clip_limit', 3.0))
+
+        self.log_output(f'設定をロードしました: {file_path}')
+
+        # コントラスト調整設定の反映をログに出力
+        if self.use_contrast_enhancement.get():
+            self.log_output(f'コントラスト調整: 有効 (倍率={self.contrast_alpha.get()}, 明度={self.brightness_beta.get()})')
+        else:
+            self.log_output('コントラスト調整: 無効')
+        
+        if self.use_clahe.get():
+            self.log_output(f'CLAHE: 有効 (制限={self.clahe_clip_limit.get()})')
+        else:
+            self.log_output('CLAHE: 無効')
+
+        # プレビューを更新
+        self.update_preview()
+
+        # ROI情報ラベルの更新
+        if self.roi_coordinates:
+            x1, y1, x2, y2 = self.roi_coordinates
+            self.roi_info_label.config(text=f'ROI: ({x1},{y1})-({x2},{y2})')
+        else:
+            self.roi_info_label.config(text='ROI未設定')
+
+        # Temporal Median Filterのステータス更新
+        if self.use_temporal_median.get() and self.temporal_background is None:
+            self.temporal_status_label.config(text='背景未作成')
+        else:
+            self.temporal_status_label.config(text='背景作成済み')
+
+        # 動画保存設定の反映
+        if self.save_video.get():
+            self.log_output('動画保存: 有効')
+        else:
+            self.log_output('動画保存: 無効')
+
+        # バックグラウンド除去設定の反映
+        if self.use_bg_removal.get():
+            self.log_output('バックグラウンド除去: 有効')
+        else:
+            self.log_output('バックグラウンド除去: 無効')
+
+        # ROI設定の反映
+        if self.roi_active.get():
+            self.log_output('ROI機能: 有効')
+        else:
+            self.log_output('ROI機能: 無効')
+
+        # 解析結果ファイルのパスを更新
+        analysis_results_path = os.path.join(self.folder_path.get(), 'analysis_results.csv')
+        if os.path.exists(analysis_results_path):
+            self.log_output(f'解析結果ファイル: {analysis_results_path}')
+        else:
+            self.log_output('解析結果ファイル: 未作成')
+
+        # 時間設定の反映
+        self.log_output(f'昼開始時刻: {self.day_start_time.get()}')
+        self.log_output(f'夜開始時刻: {self.night_start_time.get()}')
+        self.log_output(f'測定開始時刻: {self.measurement_start_time.get()}')
+
+        # グラフ描画のための時刻データの確認
+        timelog_path = os.path.join(self.folder_path.get(), 'timelog.txt')
+        if os.path.exists(timelog_path):
+            self.log_output(f'timelog.txt: {timelog_path} （存在します）')
+        else:
+            self.log_output(f'timelog.txt: {timelog_path} （存在しません）')
+
+        # すぐに解析結果グラフを表示（オプション）
+        # self.root.after(100, self.plot_results, pd.read_csv(analysis_results_path))
+
+        # Temporal Median Filterの背景画像をプレビューに反映
+        if self.temporal_background is not None:
+            bg_preview = cv2.cvtColor(self.temporal_background, cv2.COLOR_GRAY2BGR)
+            bg_preview = self.resize_image_for_canvas(bg_preview, 300, 200)
+            bg_preview_rgb = cv2.cvtColor(bg_preview, cv2.COLOR_BGR2RGB)
+            pil_bg_img = Image.fromarray(bg_preview_rgb)
+            photo_bg = ImageTk.PhotoImage(pil_bg_img)
+
+            # 背景画像キャンバスに描画
+            self.day_canvas.delete("all")
+            self.day_canvas.create_image(0, 0, anchor=tk.NW, image=photo_bg)
+            self.day_canvas.image = photo_bg  # 参照を保持
+
+            self.log_output('Temporal Median Filterの背景画像をプレビューに反映しました')
+
+        # すぐに プレビューを更新
+        self.root.after(100, self.update_preview)
+
