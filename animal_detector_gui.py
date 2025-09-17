@@ -289,7 +289,7 @@ class AnimalDetectorGUI:
     def __init__(self, root):
         self.root = root
         self.root.title('動物検出GUI')
-        self.root.geometry('1200x800')  # サイズを少し大きく調整
+        self.root.geometry('1200x550')  # サイズをさらに縦に短く調整（650→550）
 
         # ウィンドウを最大化可能にする（OS別に安全に処理）
         try:
@@ -341,7 +341,7 @@ class AnimalDetectorGUI:
         self.measurement_start_time = tk.StringVar(value='09:00:00')  # デフォルト9時開始
 
         # ROI関連
-        self.roi_coordinates = None  # (x1, y1, x2, y2) in original image coordinates
+        self.roi_coordinates = None  # (center_x, center_y, radius) in original image coordinates
         self.roi_active = tk.BooleanVar(value=False)
         self.drawing_roi = False
         self.roi_start_x = 0
@@ -376,23 +376,32 @@ class AnimalDetectorGUI:
         tk.Entry(folder_frame, textvariable=self.folder_path, width=35, font=('Arial', 8)).pack(side=tk.LEFT, fill=tk.X, expand=True)
         tk.Button(folder_frame, text='選択', command=self.select_folder, font=('Arial', 8), width=6).pack(side=tk.RIGHT, padx=(2,0))
 
-        # 昼の代表画像（コンパクト化）
-        tk.Label(left_frame, text='昼の代表画像:', font=('Arial', 9, 'bold')).grid(row=2, column=0, sticky='w', pady=(3,0))
-        day_frame = tk.Frame(left_frame)
-        day_frame.grid(row=3, column=0, columnspan=2, pady=1, sticky='ew')
-        tk.Entry(day_frame, textvariable=self.day_img_path, width=35, font=('Arial', 8)).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        tk.Button(day_frame, text='選択', command=self.select_day_image, font=('Arial', 8), width=6).pack(side=tk.RIGHT, padx=(2,0))
+        # 昼・夜の代表画像（2列レイアウト）
+        tk.Label(left_frame, text='代表画像:', font=('Arial', 9, 'bold')).grid(row=2, column=0, sticky='w', pady=(3,0))
+        images_frame = tk.Frame(left_frame)
+        images_frame.grid(row=3, column=0, columnspan=2, pady=1, sticky='ew')
 
-        # 夜の代表画像（コンパクト化）
-        tk.Label(left_frame, text='夜の代表画像:', font=('Arial', 9, 'bold')).grid(row=4, column=0, sticky='w', pady=(3,0))
-        night_frame = tk.Frame(left_frame)
-        night_frame.grid(row=5, column=0, columnspan=2, pady=1, sticky='ew')
-        tk.Entry(night_frame, textvariable=self.night_img_path, width=35, font=('Arial', 8)).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        tk.Button(night_frame, text='選択', command=self.select_night_image, font=('Arial', 8), width=6).pack(side=tk.RIGHT, padx=(2,0))
+        # 左列：昼の代表画像
+        day_column = tk.Frame(images_frame)
+        day_column.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0,2))
+        tk.Label(day_column, text='昼:', font=('Arial', 8)).pack(anchor='w')
+        day_frame = tk.Frame(day_column)
+        day_frame.pack(fill=tk.X)
+        tk.Entry(day_frame, textvariable=self.day_img_path, width=18, font=('Arial', 8)).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Button(day_frame, text='選択', command=self.select_day_image, font=('Arial', 8), width=4).pack(side=tk.RIGHT, padx=(2,0))
+
+        # 右列：夜の代表画像
+        night_column = tk.Frame(images_frame)
+        night_column.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2,0))
+        tk.Label(night_column, text='夜:', font=('Arial', 8)).pack(anchor='w')
+        night_frame = tk.Frame(night_column)
+        night_frame.pack(fill=tk.X)
+        tk.Entry(night_frame, textvariable=self.night_img_path, width=18, font=('Arial', 8)).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Button(night_frame, text='選択', command=self.select_night_image, font=('Arial', 8), width=4).pack(side=tk.RIGHT, padx=(2,0))
 
         # 個体選択方法設定を追加
         selection_frame = tk.LabelFrame(left_frame, text='Individual Selection Method', font=('Arial', 8, 'bold'))
-        selection_frame.grid(row=6, column=0, columnspan=2, pady=3, padx=5, sticky='ew')
+        selection_frame.grid(row=4, column=0, columnspan=2, pady=3, padx=5, sticky='ew')
 
         selection_row = tk.Frame(selection_frame)
         selection_row.pack(pady=2)
@@ -402,7 +411,7 @@ class AnimalDetectorGUI:
 
         # パラメータ設定（さらにコンパクト化）
         param_frame = tk.LabelFrame(left_frame, text='パラメータ設定', font=('Arial', 8, 'bold'))
-        param_frame.grid(row=7, column=0, columnspan=2, pady=3, padx=5, sticky='ew')
+        param_frame.grid(row=5, column=0, columnspan=2, pady=3, padx=5, sticky='ew')
 
         size_frame = tk.Frame(param_frame)
         size_frame.pack(pady=1)
@@ -413,29 +422,23 @@ class AnimalDetectorGUI:
         tk.Button(size_frame, text='更新', command=self.update_preview,
                  bg='lightblue', font=('Arial', 7), width=6).pack(side=tk.LEFT, padx=(5,0))
 
-        # 時間設定（コンパクト化）
+        # 時間設定（1行にまとめる）
         time_frame = tk.LabelFrame(left_frame, text='時間設定', font=('Arial', 8, 'bold'))
-        time_frame.grid(row=8, column=0, columnspan=2, pady=3, padx=5, sticky='ew')
+        time_frame.grid(row=6, column=0, columnspan=2, pady=3, padx=5, sticky='ew')
 
-        # 1行目：昼夜の開始時間
-        time_entry_frame1 = tk.Frame(time_frame)
-        time_entry_frame1.pack(pady=1)
-        tk.Label(time_entry_frame1, text='昼開始:', font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
-        tk.Entry(time_entry_frame1, textvariable=self.day_start_time, width=6, font=('Arial', 8)).pack(side=tk.LEFT, padx=1)
-        tk.Label(time_entry_frame1, text='夜開始:', font=('Arial', 7)).pack(side=tk.LEFT, padx=(5,1))
-        tk.Entry(time_entry_frame1, textvariable=self.night_start_time, width=6, font=('Arial', 8)).pack(side=tk.LEFT, padx=1)
+        time_entry_frame = tk.Frame(time_frame)
+        time_entry_frame.pack(pady=2)
+        tk.Label(time_entry_frame, text='昼開始:', font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
+        tk.Entry(time_entry_frame, textvariable=self.day_start_time, width=5, font=('Arial', 8)).pack(side=tk.LEFT, padx=1)
+        tk.Label(time_entry_frame, text='夜開始:', font=('Arial', 7)).pack(side=tk.LEFT, padx=(5,1))
+        tk.Entry(time_entry_frame, textvariable=self.night_start_time, width=5, font=('Arial', 8)).pack(side=tk.LEFT, padx=1)
+        tk.Label(time_entry_frame, text='測定開始:', font=('Arial', 7)).pack(side=tk.LEFT, padx=(5,1))
+        tk.Entry(time_entry_frame, textvariable=self.measurement_start_time, width=8, font=('Arial', 8)).pack(side=tk.LEFT, padx=1)
 
-        # 2行目：測定開始時刻
-        time_entry_frame2 = tk.Frame(time_frame)
-        time_entry_frame2.pack(pady=1)
-        tk.Label(time_entry_frame2, text='測定開始時刻:', font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
-        tk.Entry(time_entry_frame2, textvariable=self.measurement_start_time, width=10, font=('Arial', 8)).pack(side=tk.LEFT, padx=1)
-
-        # Temporal Median Filter設定（コンパクト化）
+        # Temporal Median Filter設定（ステータスを右に移動）
         temporal_frame = tk.LabelFrame(left_frame, text='Temporal Median Filter', font=('Arial', 8, 'bold'))
-        temporal_frame.grid(row=9, column=0, columnspan=2, pady=3, padx=5, sticky='ew')
+        temporal_frame.grid(row=7, column=0, columnspan=2, pady=3, padx=5, sticky='ew')
 
-        # 1行にまとめる
         temporal_row = tk.Frame(temporal_frame)
         temporal_row.pack(pady=2)
         tk.Checkbutton(temporal_row, text='使用', variable=self.use_temporal_median, font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
@@ -443,14 +446,12 @@ class AnimalDetectorGUI:
         tk.Entry(temporal_row, textvariable=self.temporal_frames, width=5, font=('Arial', 8)).pack(side=tk.LEFT, padx=1)
         tk.Button(temporal_row, text='背景作成', command=self.create_background,
                  bg='lightyellow', font=('Arial', 7), width=8).pack(side=tk.LEFT, padx=(5,0))
-
-        # ステータス表示を次の行に
-        self.temporal_status_label = tk.Label(temporal_frame, text='背景未作成', font=('Arial', 6))
-        self.temporal_status_label.pack(pady=(0,2))
+        self.temporal_status_label = tk.Label(temporal_row, text='背景未作成', font=('Arial', 6))
+        self.temporal_status_label.pack(side=tk.LEFT, padx=(5,0))
 
         # 動画保存設定（コンパクト化）
         video_frame = tk.LabelFrame(left_frame, text='動画保存設定', font=('Arial', 8, 'bold'))
-        video_frame.grid(row=10, column=0, columnspan=2, pady=3, padx=5, sticky='ew')
+        video_frame.grid(row=8, column=0, columnspan=2, pady=3, padx=5, sticky='ew')
 
         # 1行にまとめる
         video_row = tk.Frame(video_frame)
@@ -463,7 +464,7 @@ class AnimalDetectorGUI:
 
         # 二値化設定（コンパクト化）
         binarize_frame = tk.LabelFrame(left_frame, text='二値化設定', font=('Arial', 8, 'bold'))
-        binarize_frame.grid(row=11, column=0, columnspan=2, pady=3, padx=5, sticky='ew')
+        binarize_frame.grid(row=9, column=0, columnspan=2, pady=3, padx=5, sticky='ew')
 
         # 3列に分けてよりコンパクトに
         tk.Label(binarize_frame, text='メソッド:', font=('Arial', 7)).grid(row=0, column=0, padx=1, pady=1, sticky='w')
@@ -482,7 +483,7 @@ class AnimalDetectorGUI:
 
         # ROI設定（さらにコンパクト化）
         roi_frame = tk.LabelFrame(left_frame, text='ROI設定', font=('Arial', 8, 'bold'))
-        roi_frame.grid(row=12, column=0, columnspan=2, pady=3, padx=5, sticky='ew')
+        roi_frame.grid(row=10, column=0, columnspan=2, pady=3, padx=5, sticky='ew')
 
         roi_control_frame = tk.Frame(roi_frame)
         roi_control_frame.pack(pady=2)
@@ -498,7 +499,7 @@ class AnimalDetectorGUI:
 
         # コントラスト調整設定を追加
         contrast_frame = tk.LabelFrame(left_frame, text='コントラスト調整', font=('Arial', 8, 'bold'))
-        contrast_frame.grid(row=13, column=0, columnspan=2, pady=3, padx=5, sticky='ew')
+        contrast_frame.grid(row=11, column=0, columnspan=2, pady=3, padx=5, sticky='ew')
 
         # 1行目：基本設定
         contrast_row1 = tk.Frame(contrast_frame)
@@ -522,7 +523,7 @@ class AnimalDetectorGUI:
 
         # メインボタン（コンパクト化）
         button_frame = tk.Frame(left_frame)
-        button_frame.grid(row=14, column=0, columnspan=2, pady=3)
+        button_frame.grid(row=12, column=0, columnspan=2, pady=3)
 
         # 設定保存・ロードボタンを追加
         config_frame = tk.Frame(button_frame)
@@ -638,7 +639,12 @@ class AnimalDetectorGUI:
         roi_img = image
         roi_offset_x, roi_offset_y = 0, 0
         if self.roi_active.get() and self.roi_coordinates:
-            x1, y1, x2, y2 = self.roi_coordinates
+            # 円形ROI座標（center_x, center_y, radius）を矩形座標に変換
+            center_x, center_y, radius = self.roi_coordinates
+            x1 = max(0, center_x - radius)
+            y1 = max(0, center_y - radius)
+            x2 = min(image.shape[1], center_x + radius)
+            y2 = min(image.shape[0], center_y + radius)
             roi_img = image[y1:y2, x1:x2]
             roi_offset_x, roi_offset_y = x1, y1
 
@@ -708,10 +714,13 @@ class AnimalDetectorGUI:
             # ROI全体を表示する場合の元画像プレビュー
             full_resized = self.resize_image_for_canvas(image)
             full_scale = min(300 / original_w, 200 / original_h)
-            roi_x1 = int(self.roi_coordinates[0] * full_scale)
-            roi_y1 = int(self.roi_coordinates[1] * full_scale)
-            roi_x2 = int(self.roi_coordinates[2] * full_scale)
-            roi_y2 = int(self.roi_coordinates[3] * full_scale)
+
+            # 円形ROI座標（center_x, center_y, radius）を矩形座標に変換
+            center_x, center_y, radius = self.roi_coordinates
+            roi_x1 = int((center_x - radius) * full_scale)
+            roi_y1 = int((center_y - radius) * full_scale)
+            roi_x2 = int((center_x + radius) * full_scale)
+            roi_y2 = int((center_y + radius) * full_scale)
 
             # ROI領域のみ表示
             preview_img_rgb = cv2.cvtColor(preview_img, cv2.COLOR_BGR2RGB)
@@ -851,7 +860,12 @@ class AnimalDetectorGUI:
             roi_img = image
             roi_offset_x, roi_offset_y = 0, 0
             if roi_active and roi_coordinates:
-                x1, y1, x2, y2 = roi_coordinates
+                # 円形ROI座標（center_x, center_y, radius）を矩形座標に変換
+                center_x, center_y, radius = roi_coordinates
+                x1 = max(0, center_x - radius)
+                y1 = max(0, center_y - radius)
+                x2 = min(image.shape[1], center_x + radius)
+                y2 = min(image.shape[0], center_y + radius)
                 roi_img = image[y1:y2, x1:x2]
                 roi_offset_x, roi_offset_y = x1, y1
 
@@ -964,10 +978,11 @@ class AnimalDetectorGUI:
         output_path = os.path.join(folder_path, 'analysis_results.csv')
         df.to_csv(output_path, index=False)
 
-        # 時間設定を保存
+        # 時間設定を保存（測定開始時間も含める）
         time_config = {
             'day_start_time': self.day_start_time.get(),
-            'night_start_time': self.night_start_time.get()
+            'night_start_time': self.night_start_time.get(),
+            'measurement_start_time': self.measurement_start_time.get()
         }
         config_path = os.path.join(folder_path, 'time_config.json')
         import json
@@ -1033,6 +1048,18 @@ class AnimalDetectorGUI:
             merged_df.sort_values('datetime', inplace=True)
             merged_df.dropna(subset=['datetime'], inplace=True)  # Remove data without datetime
 
+            # 測定開始時間でデータをフィルタリング（オプション）
+            measurement_start_str = self.measurement_start_time.get()
+            try:
+                measurement_start = datetime.strptime(measurement_start_str, '%H:%M:%S').time()
+                # 測定開始時間以降のデータのみを使用する場合のフィルタリング
+                # filtered_df = merged_df[merged_df['datetime'].dt.time >= measurement_start]
+                # 現在はフィルタリングせず、マーカーのみ表示
+                self.log_output(f'測定開始時間を設定しました: {measurement_start_str}')
+            except ValueError:
+                measurement_start = None
+                self.log_output(f'測定開始時間の形式が無効です: {measurement_start_str}')
+
             # Create graph window
             graph_window = tk.Toplevel(self.root)
             graph_window.title("Analysis Results - Animal Activity")
@@ -1076,6 +1103,16 @@ class AnimalDetectorGUI:
                        color='blue', linewidth=1, label='Animal Area')
                 ax.set_title("Animal Activity over Time", fontsize=14, fontweight='bold')
 
+            # 測定開始時間のマーカーを表示
+            if measurement_start is not None and not merged_df.empty:
+                unique_dates = merged_df['datetime'].dt.date.unique()
+                for d in unique_dates:
+                    measurement_time = datetime.combine(d, measurement_start)
+                    # データの時間範囲内にある場合のみマーカーを表示
+                    if merged_df['datetime'].min() <= measurement_time <= merged_df['datetime'].max():
+                        ax.axvline(x=measurement_time, color='red', linestyle='--', linewidth=2,
+                                  label='Measurement Start' if d == unique_dates[0] else "", alpha=0.7)
+
             # Set English axis labels and formatting
             ax.set_xlabel("Time", fontsize=12)
             ax.set_ylabel("Area (pixels²)", fontsize=12)
@@ -1086,10 +1123,12 @@ class AnimalDetectorGUI:
             ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d %H:%M'))
             plt.setp(ax.get_xticklabels(), rotation=45, ha="right", fontsize=10)
 
-            # Add statistics text box
+            # Add statistics text box with measurement start time info
             valid_areas = merged_df['area'][merged_df['area'] > 0]
             if not valid_areas.empty:
                 stats_text = f'Statistics:\nMean: {valid_areas.mean():.1f}\nStd: {valid_areas.std():.1f}\nMax: {valid_areas.max():.1f}\nMin: {valid_areas.min():.1f}'
+                if measurement_start is not None:
+                    stats_text += f'\nMeasurement Start: {measurement_start_str}'
                 ax.text(0.02, 0.02, stats_text, transform=ax.transAxes,
                        fontsize=9, verticalalignment='bottom',
                        bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
@@ -1157,12 +1196,15 @@ class AnimalDetectorGUI:
 
     def on_roi_drag(self, event):
         if self.drawing_roi:
-            # 既存のROI矩形を削除
-            self.day_canvas.delete("roi_rect")
-            # 新しいROI矩形を描画
-            self.day_canvas.create_rectangle(
-                self.roi_start_x, self.roi_start_y, event.x, event.y,
-                outline="red", width=2, tags="roi_rect"
+            # 既存のROI円を削除
+            self.day_canvas.delete("roi_circle")
+            # 円の半径を計算
+            radius = int(((event.x - self.roi_start_x)**2 + (event.y - self.roi_start_y)**2)**0.5)
+            # 新しいROI円を描画
+            self.day_canvas.create_oval(
+                self.roi_start_x - radius, self.roi_start_y - radius,
+                self.roi_start_x + radius, self.roi_start_y + radius,
+                outline="red", width=2, tags="roi_circle"
             )
 
     def on_roi_end(self, event):
@@ -1179,24 +1221,23 @@ class AnimalDetectorGUI:
             scale_factor = getattr(self.day_canvas, 'scale_factor', 1.0)
 
             # キャンバス座標をプレビュー画像座標に変換
-            preview_x1 = max(0, self.roi_start_x - offset_x)
-            preview_y1 = max(0, self.roi_start_y - offset_y)
-            preview_x2 = max(0, event.x - offset_x)
-            preview_y2 = max(0, event.y - offset_y)
+            preview_center_x = max(0, self.roi_start_x - offset_x)
+            preview_center_y = max(0, self.roi_start_y - offset_y)
+            preview_end_x = max(0, event.x - offset_x)
+            preview_end_y = max(0, event.y - offset_y)
+
+            # 円の半径を計算
+            preview_radius = int(((preview_end_x - preview_center_x)**2 + (preview_end_y - preview_center_y)**2)**0.5)
 
             # プレビュー画像座標を元画像座標に変換
-            orig_x1 = int(preview_x1 / scale_factor)
-            orig_y1 = int(preview_y1 / scale_factor)
-            orig_x2 = int(preview_x2 / scale_factor)
-            orig_y2 = int(preview_y2 / scale_factor)
+            orig_center_x = int(preview_center_x / scale_factor)
+            orig_center_y = int(preview_center_y / scale_factor)
+            orig_radius = int(preview_radius / scale_factor)
 
-            # 座標を正規化（左上が小さい値になるように）
-            x1, x2 = min(orig_x1, orig_x2), max(orig_x1, orig_x2)
-            y1, y2 = min(orig_y1, orig_y2), max(orig_y1, orig_y2)
-
-            self.roi_coordinates = (x1, y1, x2, y2)
-            self.roi_info_label.config(text=f'ROI: ({x1},{y1})-({x2},{y2})')
-            self.log_output(f'ROIを設定しました: ({x1},{y1})-({x2},{y2})')
+            # 円形ROI座標として保存（中心座標と半径）
+            self.roi_coordinates = (orig_center_x, orig_center_y, orig_radius)
+            self.roi_info_label.config(text=f'ROI円: 中心({orig_center_x},{orig_center_y}) 半径{orig_radius}')
+            self.log_output(f'円形ROIを設定しました: 中心({orig_center_x},{orig_center_y}) 半径{orig_radius}')
 
             # ROIチェックボックスを自動で有効にする
             self.roi_active.set(True)
@@ -1259,7 +1300,12 @@ class AnimalDetectorGUI:
         # ROI適用
         roi_img = image
         if self.roi_active.get() and self.roi_coordinates:
-            x1, y1, x2, y2 = self.roi_coordinates
+            # 円形ROI座標（center_x, center_y, radius）を矩形座標に変換
+            center_x, center_y, radius = self.roi_coordinates
+            x1 = max(0, center_x - radius)
+            y1 = max(0, center_y - radius)
+            x2 = min(image.shape[1], center_x + radius)
+            y2 = min(image.shape[0], center_y + radius)
             roi_img = image[y1:y2, x1:x2]
 
         try:
@@ -1485,6 +1531,49 @@ class AnimalDetectorGUI:
         # すぐに プレビューを更新
         self.root.after(100, self.update_preview)
 
+    def apply_circular_roi(image, center_x, center_y, radius):
+        """
+        円形ROIを画像に適用する関数
+
+        Args:
+            image: 入力画像
+            center_x, center_y: 円の中心座標
+            radius: 円の半径
+
+        Returns:
+            roi_img: 円形ROIが適用された画像（矩形切り出し）
+            mask: 円形マスク
+            offset_x, offset_y: 切り出し画像のオフセット
+        """
+        h, w = image.shape[:2]
+
+        # 円を含む最小の矩形を計算
+        x1 = max(0, center_x - radius)
+        y1 = max(0, center_y - radius)
+        x2 = min(w, center_x + radius)
+        y2 = min(h, center_y + radius)
+
+        # 矩形で切り出し
+        roi_img = image[y1:y2, x1:x2]
+
+        # 円形マスクを作成
+        mask_h, mask_w = roi_img.shape[:2]
+        mask = np.zeros((mask_h, mask_w), dtype=np.uint8)
+
+        # 切り出し画像内での円の中心座標
+        mask_center_x = center_x - x1
+        mask_center_y = center_y - y1
+
+        cv2.circle(mask, (mask_center_x, mask_center_y), radius, 255, -1)
+
+        # マスクを適用
+        if len(roi_img.shape) == 3:
+            roi_img = cv2.bitwise_and(roi_img, roi_img, mask=mask)
+        else:
+            roi_img = cv2.bitwise_and(roi_img, roi_img, mask=mask)
+
+        return roi_img, mask, x1, y1
+
 # エントリーポイント
 def main():
     root = tk.Tk()
@@ -1494,3 +1583,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
