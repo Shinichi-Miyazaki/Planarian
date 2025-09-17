@@ -291,8 +291,22 @@ class AnimalDetectorGUI:
         self.root.title('動物検出GUI')
         self.root.geometry('1200x800')  # サイズを少し大きく調整
 
-        # ウィンドウを最大化可能にする
-        self.root.state('zoomed') if self.root.tk.call('tk', 'windowingsystem') == 'win32' else self.root.attributes('-zoomed', True)
+        # ウィンドウを最大化可能にする（OS別に安全に処理）
+        try:
+            ws = self.root.tk.call('tk', 'windowingsystem')
+            if ws == 'win32':
+                self.root.state('zoomed')
+            elif ws == 'x11':
+                self.root.attributes('-zoomed', True)
+            else:
+                # macOS (aqua) は -zoomed 未対応のため、画面サイズに合わせる
+                self.root.update_idletasks()
+                w = self.root.winfo_screenwidth()
+                h = self.root.winfo_screenheight()
+                self.root.geometry(f"{w}x{h}+0+0")
+        except Exception:
+            # 失敗しても通常サイズで続行
+            pass
 
         # 変数
         self.folder_path = tk.StringVar()
@@ -667,7 +681,16 @@ class AnimalDetectorGUI:
                          bg_kernel_size=self.bg_kernel_size.get())
 
         # 検出（スケール比を考慮）
-        results, contours = analyze(binary, min_area, max_area, True, scale_factor, roi_offset_x, roi_offset_y)
+        results, contours = analyze(
+            binary,
+            min_area=min_area,
+            max_area=max_area,
+            select_center_only=(not self.select_largest.get()),
+            select_largest=self.select_largest.get(),
+            scale_factor=scale_factor,
+            roi_offset_x=roi_offset_x,
+            roi_offset_y=roi_offset_y
+        )
 
         # 検出結果を描画
         preview_img = resized_img.copy()
@@ -870,7 +893,16 @@ class AnimalDetectorGUI:
                              bg_kernel_size=bg_kernel_size)
 
             # 解析
-            results, contours = analyze(binary, min_area, max_area, True, 1.0, roi_offset_x, roi_offset_y)
+            results, contours = analyze(
+                binary,
+                min_area=min_area,
+                max_area=max_area,
+                select_center_only=(not self.select_largest.get()),
+                select_largest=self.select_largest.get(),
+                scale_factor=1.0,
+                roi_offset_x=roi_offset_x,
+                roi_offset_y=roi_offset_y
+            )
 
             # 動画フレーム作成（動画保存が有効な場合）
             if video_writer is not None:
@@ -1453,3 +1485,12 @@ class AnimalDetectorGUI:
         # すぐに プレビューを更新
         self.root.after(100, self.update_preview)
 
+# エントリーポイント
+def main():
+    root = tk.Tk()
+    app = AnimalDetectorGUI(root)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()

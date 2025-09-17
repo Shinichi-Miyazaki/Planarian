@@ -1,0 +1,16 @@
+# Core scientific stack
+numpy>=1.26,<3.0
+pandas>=2.0
+scipy>=1.10
+
+# Image processing
+opencv-python>=4.7
+scikit-image>=0.21
+Pillow>=10.0
+
+# Plotting
+matplotlib>=3.7
+
+# Notes:
+# - tkinter is part of the Python standard library (no pip package). Ensure your Python build has Tk support.
+# - If you face issues with GUI backends on macOS, install Python via python.org installer or ensure Tk is available.
