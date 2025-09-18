@@ -160,6 +160,55 @@ def enhance_contrast(image, use_contrast=False, alpha=1.5, beta=0, use_clahe=Fal
 
     return enhanced
 
+def apply_roi_mask(image, roi_coordinates):
+    """
+    ROI外の領域をマスクして黒くする（円形マスクを作成）
+
+    Args:
+        image: 入力画像
+        roi_coordinates: (center_x, center_y, radius) のタプル
+
+    Returns:
+        masked_image: マスク適用後の画像
+    """
+    if roi_coordinates is None:
+        return image
+
+    center_x, center_y, radius = roi_coordinates
+
+    # マスクを作成（円形）
+    mask = np.zeros(image.shape[:2], dtype=np.uint8)
+    cv2.circle(mask, (int(center_x), int(center_y)), int(radius), 255, -1)
+
+    # マスクを適用
+    if len(image.shape) == 3:
+        # カラー画像の場合
+        masked_image = cv2.bitwise_and(image, image, mask=mask)
+    else:
+        # グレースケール画像の場合
+        masked_image = cv2.bitwise_and(image, image, mask=mask)
+
+    return masked_image
+
+def is_nighttime_by_brightness(image, brightness_threshold=50):
+    """
+    画像の明度から夜間かどうかを判定
+
+    Args:
+        image: 入力画像
+        brightness_threshold: 夜間判定の明度閾値（この値以下なら夜間）
+
+    Returns:
+        bool: 夜間の場合True
+    """
+    if len(image.shape) == 3:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = image
+
+    mean_brightness = np.mean(gray)
+    return mean_brightness <= brightness_threshold
+
 # --- 画像解析関数 ---
 def is_daytime(image, threshold):
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -177,14 +226,35 @@ def calc_threshold_by_histogram(image, std_factor=2.0):
 # binarize関数のthresh引数を自動計算に変更
 # std_factorは昼夜で別々に指定可能にする
 
-def binarize(image, method='adaptive', relative_thresh=0.1, block_size=11, c_value=2, use_bg_removal=False, bg_kernel_size=50):
+def binarize(image, method='adaptive', relative_thresh=0.1, block_size=11, c_value=2, use_bg_removal=False, bg_kernel_size=50, roi_coordinates=None, auto_night_contrast=False, night_brightness_threshold=50):
     """
-    統一的な二値化関数
-    method: 'adaptive' (適応的), 'relative' (相対閾値), 'fixed' (固定閾値)
-    relative_thresh: 相対閾値方式での閾値（平均輝度からの割合, 0.0-1.0）
-    block_size: 適応的二値化のブロックサイズ
-    c_value: 適応的二値化の定数
+    統一的な二値化関数（ROIマスクと夜間自動コントラスト調整対応）
+
+    Args:
+        method: 'adaptive' (適応的), 'relative' (相対閾値), 'fixed' (固定閾値)
+        relative_thresh: 相対閾値方式での閾値（平均輝度からの割合, 0.0-1.0）
+        block_size: 適応的二値化のブロックサイズ（奇数）
+        c_value: 適応的二値化の定数C（平均から引く値）
+        use_bg_removal: バックグラウンド除去を使用するか
+        bg_kernel_size: バックグラウンド除去のカーネルサイズ
+        roi_coordinates: ROI座標 (center_x, center_y, radius)
+        auto_night_contrast: 夜間自動コントラスト調整を使用するか
+        night_brightness_threshold: 夜間判定の明度閾値
+
+    詳細説明:
+        - block_size: 適応的二値化で使用する近傍領域のサイズ。大きくすると広い範囲の平均を使用
+        - c_value: 適応的二値化の定数C。この値が大きいほど暗い部分が白になりにくい
+        - relative_thresh: 相対閾値での閾値係数。0.1なら平均輝度の90%を閾値とする
     """
+    # ROIマスクを適用（ROI座標が指定されている場合）
+    if roi_coordinates is not None:
+        image = apply_roi_mask(image, roi_coordinates)
+
+    # 夜間自動判定とコントラスト調整
+    if auto_night_contrast and is_nighttime_by_brightness(image, night_brightness_threshold):
+        # 夜間と判定された場合のみコントラスト調整を適用
+        image = enhance_contrast(image, use_contrast=True, alpha=1.5, beta=10, use_clahe=True, clip_limit=3.0)
+
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
     # バックグラウンド除去（オプション）
@@ -193,6 +263,11 @@ def binarize(image, method='adaptive', relative_thresh=0.1, block_size=11, c_val
 
     if method == 'adaptive':
         # 適応的二値化（動物が暗い場合はTHRESH_BINARY_INVを使用）
+        # block_sizeは奇数である必要がある
+        if block_size % 2 == 0:
+            block_size += 1
+        block_size = max(3, block_size)  # 最小値は3
+
         binary = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                                      cv2.THRESH_BINARY_INV, block_size, c_value)
     elif method == 'relative':
@@ -212,7 +287,7 @@ def analyze(binary, min_area=100, max_area=10000, select_center_only=True, selec
     個体検出・解析関数（改良版）
 
     Args:
-        select_largest: Trueの場合、最大面積の個体を選択
+        select_largest: Trueの場合、最大面積かつ最も中心に近い個体を選択
         select_center_only: Trueの場合、中心に最も近い個体を選択（select_largestがFalseの時のみ）
     """
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -268,10 +343,16 @@ def analyze(binary, min_area=100, max_area=10000, select_center_only=True, selec
 
     if candidates:
         if select_largest:
-            # 最大面積の個体を選択
-            largest_candidate = max(candidates, key=lambda x: x['area'])
-            results.append({k: v for k, v in largest_candidate.items() if k != 'contour'})
-            valid_contours.append(largest_candidate['contour'])
+            # 最大面積かつ最も中心に近い個体を選択
+            # まず面積でソートして上位20%の候補を取得
+            candidates_sorted_by_area = sorted(candidates, key=lambda x: x['area'], reverse=True)
+            top_area_count = max(1, len(candidates_sorted_by_area) // 5)  # 上位20%、最低1個
+            top_area_candidates = candidates_sorted_by_area[:top_area_count]
+
+            # 上位面積の候補の中から最も中心に近い個体を選択
+            best_candidate = min(top_area_candidates, key=lambda x: x['distance_from_center'])
+            results.append({k: v for k, v in best_candidate.items() if k != 'contour'})
+            valid_contours.append(best_candidate['contour'])
         elif select_center_only:
             # 中心に最も近い個体を選択
             closest_candidate = min(candidates, key=lambda x: x['distance_from_center'])
@@ -677,14 +758,25 @@ class AnimalDetectorGUI:
         canvas.image_offset_x = (canvas_width - resized_w) // 2
         canvas.image_offset_y = (canvas_height - resized_h) // 2
 
-        # 二値化（新しい統一的なパラメータを使用）
+        # 二値化（ROI座標を渡して完全なマスクを適用）
+        roi_coords_for_binarize = None
+        if self.roi_active.get() and self.roi_coordinates:
+            # プレビュー用の座標をリサイズ後の座標に変換
+            center_x, center_y, radius = self.roi_coordinates
+            # ROI座標をリサイズ後の画像座標に変換
+            roi_center_x = (center_x - roi_offset_x) * scale_factor
+            roi_center_y = (center_y - roi_offset_y) * scale_factor
+            roi_radius = radius * scale_factor
+            roi_coords_for_binarize = (roi_center_x, roi_center_y, roi_radius)
+
         binary = binarize(resized_img,
                          method=self.binarize_method.get(),
                          relative_thresh=self.relative_thresh.get(),
                          block_size=self.block_size.get(),
                          c_value=self.c_value.get(),
                          use_bg_removal=self.use_bg_removal.get(),
-                         bg_kernel_size=self.bg_kernel_size.get())
+                         bg_kernel_size=self.bg_kernel_size.get(),
+                         roi_coordinates=roi_coords_for_binarize)
 
         # 検出（スケール比を考慮）
         results, contours = analyze(
@@ -1310,14 +1402,17 @@ class AnimalDetectorGUI:
 
         try:
             if mode == 'original':
-                # 元画像を表示
-                display_img = roi_img.copy()
+                # 元画像を表示                display_img = roi_img.copy()
                 title = "元画像"
             elif mode == 'background':
                 # 背景画像を表示
                 bg_roi = self.temporal_background
                 if self.roi_active.get() and self.roi_coordinates:
-                    x1, y1, x2, y2 = self.roi_coordinates
+                    center_x, center_y, radius = self.roi_coordinates
+                    x1 = max(0, center_x - radius)
+                    y1 = max(0, center_y - radius)
+                    x2 = min(self.temporal_background.shape[1], center_x + radius)
+                    y2 = min(self.temporal_background.shape[0], center_y + radius)
                     bg_roi = self.temporal_background[y1:y2, x1:x2]
 
                 # グレースケールをBGRに変換
@@ -1327,7 +1422,11 @@ class AnimalDetectorGUI:
                 # 減算結果を表示
                 bg_roi = self.temporal_background
                 if self.roi_active.get() and self.roi_coordinates:
-                    x1, y1, x2, y2 = self.roi_coordinates
+                    center_x, center_y, radius = self.roi_coordinates
+                    x1 = max(0, center_x - radius)
+                    y1 = max(0, center_y - radius)
+                    x2 = min(self.temporal_background.shape[1], center_x + radius)
+                    y2 = min(self.temporal_background.shape[0], center_y + radius)
                     bg_roi = self.temporal_background[y1:y2, x1:x2]
 
                 # 背景減算を適用
