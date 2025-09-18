@@ -20,7 +20,7 @@ plt.rcParams['figure.dpi'] = 300
 
 
 class BehaviorAnalyzer:
-    def __init__(self, csv_path, time_interval_minutes=10, day_start_time='07:00', night_start_time='19:00'):
+    def __init__(self, csv_path, time_interval_minutes=10, day_start_time='07:00', night_start_time='19:00', measurement_start_time='09:00:00'):
         """
         動物行動解析クラス
 
@@ -29,11 +29,13 @@ class BehaviorAnalyzer:
         time_interval_minutes: 時間間隔（分）
         day_start_time: 昼の開始時間 (HH:MM形式)
         night_start_time: 夜の開始時間 (HH:MM形式)
+        measurement_start_time: 測定開始時間 (HH:MM:SS形式)
         """
         self.csv_path = csv_path
         self.time_interval = time_interval_minutes
         self.day_start_time = day_start_time
         self.night_start_time = night_start_time
+        self.measurement_start_time = measurement_start_time
         self.df = None
         self.processed_df = None
 
@@ -44,14 +46,52 @@ class BehaviorAnalyzer:
         else:
             print(f"Light-dark cycle condition: Day {day_start_time} - {night_start_time}")
 
+    def _generate_timestamps(self):
+        """
+        測定開始時刻と10秒間隔に基づいてタイムスタンプを生成する。
+        """
+        from datetime import datetime, timedelta, date
+
+        start_time = datetime.strptime(self.measurement_start_time, '%H:%M:%S').time()
+
+        # CSVファイルの日付を基準にする（なければ今日）
+        try:
+            file_date = pd.to_datetime(self.df['datetime'].iloc[0]).date()
+        except (KeyError, IndexError):
+            file_date = date.today()
+
+        start_datetime = datetime.combine(file_date, start_time)
+
+        # ファイル名でソートされたリストを取得
+        sorted_filenames = sorted(self.df['filename'].unique())
+
+        timestamps = []
+        current_datetime = start_datetime
+        for _ in range(len(sorted_filenames)):
+            timestamps.append(current_datetime)
+            current_datetime += timedelta(seconds=10)
+
+        time_df = pd.DataFrame({
+            'filename': sorted_filenames,
+            'datetime': timestamps
+        })
+        return time_df
+
     def load_data(self):
         """CSVデータを読み込み、前処理を行う"""
         try:
             self.df = pd.read_csv(self.csv_path)
             print(f"データを読み込みました: {len(self.df)}行")
 
-            # ファイル名から時刻情報を抽出
-            self.df['datetime'] = self.df['filename'].apply(self._extract_datetime)
+            # --- タイムスタンプ生成ロジックの変更 ---
+            # ファイル名から時刻を抽出する代わりに、測定開始時刻から生成する
+            time_df = self._generate_timestamps()
+
+            # 元のDataFrameからdatetime列を削除し、新しいタイムスタンプをマージ
+            if 'datetime' in self.df.columns:
+                self.df = self.df.drop(columns=['datetime'])
+            self.df = pd.merge(self.df, time_df, on='filename', how='left')
+            # --- 変更ここまで ---
 
             # 時刻でソート
             self.df = self.df.sort_values('datetime').reset_index(drop=True)
@@ -65,36 +105,6 @@ class BehaviorAnalyzer:
         except Exception as e:
             print(f"データ読み込みエラー: {e}")
             return False
-
-    def _extract_datetime(self, filename):
-        """ファイル名から日時を抽出（9時スタートの連番として処理）"""
-        # 一般的なファイル名パターンを試行
-        patterns = [
-            r'(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})',  # YYYYMMDD_HHMMSS
-            r'(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})',  # YYYY-MM-DD_HH-MM-SS
-            r'(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})',  # YYYYMMDDHHMMSS
-        ]
-
-        for pattern in patterns:
-            match = re.search(pattern, filename)
-            if match:
-                groups = match.groups()
-                try:
-                    return datetime(int(groups[0]), int(groups[1]), int(groups[2]),
-                                    int(groups[3]), int(groups[4]), int(groups[5]))
-                except Exception:
-                    continue
-
-        # パターンが見つからない場合、連番として処理（9時スタート）
-        number_match = re.search(r'(\d+)', filename)
-        if number_match:
-            file_number = int(number_match.group(1))
-        else:
-            file_number = 0
-
-        start_time = datetime(2024, 1, 1, 9, 0, 0)  # 9時スタート
-        result_time = start_time + timedelta(seconds=file_number * 10)
-        return result_time
 
     def remove_outliers(self, data, method='iqr', threshold=1.5):
         """外れ値を除去"""
@@ -451,6 +461,7 @@ def main():
     # 時間設定を読み込み（存在すれば）
     day_start_time = '07:00'
     night_start_time = '19:00'
+    measurement_start_time = '09:00:00' # 追加
     config_path = os.path.join(csv_dir, 'time_config.json')
     if os.path.exists(config_path):
         try:
@@ -458,15 +469,19 @@ def main():
                 time_config = json.load(f)
                 day_start_time = time_config.get('day_start_time', day_start_time)
                 night_start_time = time_config.get('night_start_time', night_start_time)
-            print(f"時間設定を読み込みました: 昼開始 {day_start_time}, 夜開始 {night_start_time}")
+                measurement_start_time = time_config.get('measurement_start_time', '09:00:00') # 追加
+            print(f"時間設定を読み込みました: 昼 {day_start_time}, 夜 {night_start_time}, 測定開始 {measurement_start_time}")
         except Exception as e:
             print(f"時間設定の読み込みに失敗しました: {e}, デフォルト値を使用します")
     else:
         print("時間設定ファイルが見つかりません。デフォルト値を使用します")
+        measurement_start_time = '09:00:00' # デフォルト値
 
     # 解析器を初期化（10分間隔で解析、時間設定を適用）
     analyzer = BehaviorAnalyzer(csv_path, time_interval_minutes=10,
-                                day_start_time=day_start_time, night_start_time=night_start_time)
+                                day_start_time=day_start_time,
+                                night_start_time=night_start_time,
+                                measurement_start_time=measurement_start_time)
 
     # データ読み込みと前処理
     if not analyzer.load_data():

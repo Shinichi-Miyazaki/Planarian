@@ -280,6 +280,10 @@ def binarize(image, method='adaptive', relative_thresh=0.1, block_size=11, c_val
         thresh = int(relative_thresh * 255) if relative_thresh <= 1.0 else int(relative_thresh)
         _, binary = cv2.threshold(gray, thresh, 255, cv2.THRESH_BINARY_INV)
 
+    # 二値化後にも ROI マスクを適用して、ROI 外を確実に 0 にする
+    if roi_coordinates is not None:
+        binary = apply_roi_mask(binary, roi_coordinates)
+
     return binary
 
 def analyze(binary, min_area=100, max_area=10000, select_center_only=True, select_largest=False, scale_factor=1.0, roi_offset_x=0, roi_offset_y=0):
@@ -797,9 +801,7 @@ class AnimalDetectorGUI:
             # ROI座標を考慮してプレビュー座標に変換
             roi_rel_x = result['centroid_x'] - roi_offset_x
             roi_rel_y = result['centroid_y'] - roi_offset_y
-            preview_x = int(roi_rel_x * scale_factor)
-            preview_y = int(roi_rel_y * scale_factor)
-            cv2.circle(preview_img, (preview_x, preview_y), 3, (0, 0, 255), -1)
+            cv2.circle(preview_img, (int(roi_rel_x * scale_factor), int(roi_rel_y * scale_factor)), 3, (0, 0, 255), -1)
 
         # ROI矩形を描画（ROI有効時）
         if self.roi_active.get() and self.roi_coordinates:
@@ -923,7 +925,12 @@ class AnimalDetectorGUI:
                     if first_img is not None:
                         # ROI適用後のサイズを取得
                         if roi_active and roi_coordinates:
-                            x1, y1, x2, y2 = roi_coordinates
+                            # 円形ROI(center_x, cy, r) から矩形を算出
+                            cx, cy, r = roi_coordinates
+                            x1 = max(0, cx - r)
+                            y1 = max(0, cy - r)
+                            x2 = min(first_img.shape[1], cx + r)
+                            y2 = min(first_img.shape[0], cy + r)
                             first_img = first_img[y1:y2, x1:x2]
 
                         # スケール適用
@@ -951,6 +958,7 @@ class AnimalDetectorGUI:
             # ROIが有効な場合は対象領域を切り出し
             roi_img = image
             roi_offset_x, roi_offset_y = 0, 0
+            roi_rel_coords = None  # binarize 用のROI（ROI矩形内の相対座標）
             if roi_active and roi_coordinates:
                 # 円形ROI座標（center_x, center_y, radius）を矩形座標に変換
                 center_x, center_y, radius = roi_coordinates
@@ -960,13 +968,23 @@ class AnimalDetectorGUI:
                 y2 = min(image.shape[0], center_y + radius)
                 roi_img = image[y1:y2, x1:x2]
                 roi_offset_x, roi_offset_y = x1, y1
+                # binarize に渡すためのROI円（切り出し矩形に対する相対座標）
+                roi_rel_coords = (
+                    int(center_x - roi_offset_x),
+                    int(center_y - roi_offset_y),
+                    int(radius)
+                )
 
             # Temporal median filterを適用（有効な場合）
             if self.use_temporal_median.get() and self.temporal_background is not None:
                 # ROIが適用されている場合は、背景もROIでクリッピング
                 bg_roi = self.temporal_background
                 if roi_active and roi_coordinates:
-                    x1, y1, x2, y2 = roi_coordinates
+                    cx, cy, r = roi_coordinates
+                    x1 = max(0, cx - r)
+                    y1 = max(0, cy - r)
+                    x2 = min(self.temporal_background.shape[1], cx + r)
+                    y2 = min(self.temporal_background.shape[0], cy + r)
                     bg_roi = self.temporal_background[y1:y2, x1:x2]
 
                 # 背景引き算を適用
@@ -996,7 +1014,8 @@ class AnimalDetectorGUI:
                              block_size=block_size,
                              c_value=c_value,
                              use_bg_removal=use_bg_removal,
-                             bg_kernel_size=bg_kernel_size)
+                             bg_kernel_size=bg_kernel_size,
+                             roi_coordinates=roi_rel_coords)
 
             # 解析
             results, contours = analyze(
@@ -1093,46 +1112,45 @@ class AnimalDetectorGUI:
             self.log_output("Analysis results are empty. No graph will be created.")
             return
 
-        timelog_path = os.path.join(self.folder_path.get(), 'timelog.txt')
-        if not os.path.exists(timelog_path):
-            self.log_output(f"timelog.txt not found: {timelog_path}")
-            messagebox.showwarning("Warning", "timelog.txt not found. No graph will be created.")
-            return
-
         try:
-            # Read timelog.txt (supporting time-only format)
-            with open(timelog_path, 'r') as f:
-                time_lines = f.readlines()
+            # --- タイムスタンプ生成ロジックの変更 ---
+            # timelog.txt を使わず、GUIの測定開始時刻と10秒間隔でタイムスタンプを生成する
+            from datetime import datetime, timedelta, date
 
-            # Process time data
+            measurement_start_str = self.measurement_start_time.get()
+            start_time = datetime.strptime(measurement_start_str, '%H:%M:%S').time()
+
+            # 画像ファイルの日付を特定する（ここでは今日の日付を基準とする）
+            today = date.today()
+            start_datetime = datetime.combine(today, start_time)
+
+            # 解析結果のDataFrameに'filename'列が存在することを確認
+            if 'filename' not in df.columns:
+                self.log_output("Error: 'filename' column not found in analysis results.")
+                messagebox.showerror("Error", "'filename' column not found. Cannot generate time axis.")
+                return
+
+            # ファイル名でソートされたリストを取得
+            # dfにすでにファイル名があるので、それをソートして使う
+            sorted_filenames = sorted(df['filename'].unique())
+
             timestamps = []
-            filenames = []
+            current_datetime = start_datetime
+            for _ in sorted_filenames:
+                timestamps.append(current_datetime)
+                current_datetime += timedelta(seconds=10)
 
-            # Get sorted image filenames
-            image_files = sorted([f for f in os.listdir(self.folder_path.get())
-                                if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp'))])
+            if len(sorted_filenames) != len(timestamps):
+                 self.log_output(f"Warning: Mismatch between number of files ({len(sorted_filenames)}) and timestamps ({len(timestamps)}).")
 
-            for i, time_line in enumerate(time_lines):
-                time_str = time_line.strip()
-                if time_str and i < len(image_files):
-                    # Combine today's date with time to create complete datetime
-                    from datetime import date
-                    today = date.today()
-                    full_datetime_str = f"{today} {time_str}"
-                    try:
-                        timestamp = pd.to_datetime(full_datetime_str)
-                        timestamps.append(timestamp)
-                        filenames.append(image_files[i])
-                    except:
-                        continue
-
-            # Create DataFrame
             time_df = pd.DataFrame({
-                'filename': filenames,
+                'filename': sorted_filenames,
                 'datetime': timestamps
             })
 
-            merged_df = pd.merge(time_df, df, on='filename', how='right')
+            merged_df = pd.merge(df, time_df, on='filename', how='left')
+            # --- 変更ここまで ---
+
             if 'datetime' not in merged_df.columns or merged_df['datetime'].isnull().all():
                 self.log_output("Failed to merge datetime data. Please check if filenames match.")
                 return
@@ -1402,7 +1420,8 @@ class AnimalDetectorGUI:
 
         try:
             if mode == 'original':
-                # 元画像を表示                display_img = roi_img.copy()
+                # 元画像を表示
+                display_img = roi_img.copy()
                 title = "元画像"
             elif mode == 'background':
                 # 背景画像を表示
@@ -1561,8 +1580,19 @@ class AnimalDetectorGUI:
 
         # ROI情報ラベルの更新
         if self.roi_coordinates:
-            x1, y1, x2, y2 = self.roi_coordinates
-            self.roi_info_label.config(text=f'ROI: ({x1},{y1})-({x2},{y2})')
+            try:
+                # 円形ROI (cx, cy, r)
+                if len(self.roi_coordinates) == 3:
+                    cx, cy, r = self.roi_coordinates
+                    self.roi_info_label.config(text=f'ROI円: 中心({cx},{cy}) 半径{r}')
+                # 旧形式の矩形ROI (x1, y1, x2, y2)
+                elif len(self.roi_coordinates) == 4:
+                    x1, y1, x2, y2 = self.roi_coordinates
+                    self.roi_info_label.config(text=f'ROI矩形: ({x1},{y1})-({x2},{y2})')
+                else:
+                    self.roi_info_label.config(text=f'ROI: {self.roi_coordinates}')
+            except Exception:
+                self.roi_info_label.config(text=f'ROI: {self.roi_coordinates}')
         else:
             self.roi_info_label.config(text='ROI未設定')
 
