@@ -1550,8 +1550,8 @@ class AnimalDetectorGUI:
         self.save_video.set(config.get('save_video', False))
         self.video_fps.set(config.get('video_fps', 10))
         self.video_scale.set(config.get('video_scale', 0.5))
-        self.day_start_time.set(config.get('day_start_time', '07:00'))
-        self.night_start_time.set(config.get('night_start_time', '19:00'))
+        self.day_start_time.set(config.get('day_start_time', '00:00'))
+        self.night_start_time.set(config.get('night_start_time', '12:00'))
         self.measurement_start_time.set(config.get('measurement_start_time', '09:00:00'))
         self.roi_coordinates = config.get('roi_coordinates', None)
 
