@@ -1,10 +1,12 @@
 import tkinter as tk
+import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 from PIL import Image, ImageTk
 import cv2
 import numpy as np
 from skimage.morphology import white_tophat, disk
 import os
+import re
 import pandas as pd
 import threading
 import matplotlib.pyplot as plt
@@ -425,6 +427,9 @@ class AnimalDetectorGUI:
         # 測定開始時刻設定
         self.measurement_start_time = tk.StringVar(value='09:00:00')  # デフォルト9時開始
 
+        # 測定開始日付設定
+        self.measurement_date = tk.StringVar(value='2025-01-01')  # デフォルト日付（YYYY-MM-DD形式）
+
         # ROI関連
         self.roi_coordinates = None  # (center_x, center_y, radius) in original image coordinates
         self.roi_active = tk.BooleanVar(value=False)
@@ -519,6 +524,12 @@ class AnimalDetectorGUI:
         tk.Entry(time_entry_frame, textvariable=self.night_start_time, width=5, font=('Arial', 8)).pack(side=tk.LEFT, padx=1)
         tk.Label(time_entry_frame, text='測定開始:', font=('Arial', 7)).pack(side=tk.LEFT, padx=(5,1))
         tk.Entry(time_entry_frame, textvariable=self.measurement_start_time, width=8, font=('Arial', 8)).pack(side=tk.LEFT, padx=1)
+
+        # 2行目：測定開始日付
+        date_entry_frame = tk.Frame(time_frame)
+        date_entry_frame.pack(pady=2)
+        tk.Label(date_entry_frame, text='測定日付 (YYYY-MM-DD):', font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
+        tk.Entry(date_entry_frame, textvariable=self.measurement_date, width=12, font=('Arial', 8)).pack(side=tk.LEFT, padx=1)
 
         # Temporal Median Filter設定（ステータスを右に移動）
         temporal_frame = tk.LabelFrame(left_frame, text='Temporal Median Filter', font=('Arial', 8, 'bold'))
@@ -1131,8 +1142,11 @@ class AnimalDetectorGUI:
                 return
 
             # ファイル名でソートされたリストを取得
-            # dfにすでにファイル名があるので、それをソートして使う
-            sorted_filenames = sorted(df['filename'].unique())
+            # 自然順ソート（数字部分を数値としてソートする）
+            def natural_key(s):
+                return [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', str(s))]
+
+            sorted_filenames = sorted(df['filename'].unique(), key=natural_key)
 
             timestamps = []
             current_datetime = start_datetime

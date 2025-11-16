@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
-from datetime import datetime, timedelta
+from datetime import datetime
 import os
 import re
 from scipy import stats
@@ -20,7 +20,7 @@ plt.rcParams['figure.dpi'] = 300
 
 
 class BehaviorAnalyzer:
-    def __init__(self, csv_path, time_interval_minutes=10, day_start_time='07:00', night_start_time='19:00', measurement_start_time='09:00:00'):
+    def __init__(self, csv_path, time_interval_minutes=10, day_start_time='07:00', night_start_time='19:00', measurement_start_time='09:00:00', measurement_date=None):
         """
         動物行動解析クラス
 
@@ -30,12 +30,14 @@ class BehaviorAnalyzer:
         day_start_time: 昼の開始時間 (HH:MM形式)
         night_start_time: 夜の開始時間 (HH:MM形式)
         measurement_start_time: 測定開始時間 (HH:MM:SS形式)
+        measurement_date: 測定開始日付 (datetime.date オブジェクト、Noneの場合は今日)
         """
         self.csv_path = csv_path
         self.time_interval = time_interval_minutes
         self.day_start_time = day_start_time
         self.night_start_time = night_start_time
         self.measurement_start_time = measurement_start_time
+        self.measurement_date = measurement_date
         self.df = None
         self.processed_df = None
 
@@ -54,16 +56,24 @@ class BehaviorAnalyzer:
 
         start_time = datetime.strptime(self.measurement_start_time, '%H:%M:%S').time()
 
-        # CSVファイルの日付を基準にする（なければ今日）
-        try:
-            file_date = pd.to_datetime(self.df['datetime'].iloc[0]).date()
-        except (KeyError, IndexError):
-            file_date = date.today()
+        # 日付を使用（CSVから取得するのではなく、初期化時に指定された日付を使う）
+        if hasattr(self, 'measurement_date') and self.measurement_date:
+            file_date = self.measurement_date
+        else:
+            # フォールバック: CSVファイルの日付を基準にする（なければ今日）
+            try:
+                file_date = pd.to_datetime(self.df['datetime'].iloc[0]).date()
+            except (KeyError, IndexError):
+                file_date = date.today()
 
         start_datetime = datetime.combine(file_date, start_time)
 
         # ファイル名でソートされたリストを取得
-        sorted_filenames = sorted(self.df['filename'].unique())
+        # 自然順ソート（数字部分を数値としてソートする）を使ってフレーム順を確実にする
+        def natural_key(s):
+            return [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', str(s))]
+
+        sorted_filenames = sorted(self.df['filename'].unique(), key=natural_key)
 
         timestamps = []
         current_datetime = start_datetime
@@ -75,6 +85,8 @@ class BehaviorAnalyzer:
             'filename': sorted_filenames,
             'datetime': timestamps
         })
+        # pandasのdatetime型に変換しておく
+        time_df['datetime'] = pd.to_datetime(time_df['datetime'])
         return time_df
 
     def load_data(self):
@@ -91,6 +103,8 @@ class BehaviorAnalyzer:
             if 'datetime' in self.df.columns:
                 self.df = self.df.drop(columns=['datetime'])
             self.df = pd.merge(self.df, time_df, on='filename', how='left')
+            # datetime列を確実にdatetime型にする
+            self.df['datetime'] = pd.to_datetime(self.df['datetime'])
             # --- 変更ここまで ---
 
             # 時刻でソート
@@ -158,21 +172,21 @@ class BehaviorAnalyzer:
         self.df['movement'] = movements
         return movements
 
-    def calculate_immobility_ratio(self, body_length_threshold=0.01):
-        """不動割合を計算（体長の1%以下の移動を不動とする）"""
+    def calculate_immobility_ratio(self, immobility_threshold_pixels=3.0):
+        """不動割合を計算（指定ピクセル以下の移動を不動とする）"""
         immobility_data = []
         for i in range(len(self.df)):
-            body_size = self.df.loc[i, 'body_length']
             movement = self.df.loc[i, 'movement']
-            is_immobile = movement <= (body_size * body_length_threshold)
+            is_immobile = movement <= immobility_threshold_pixels
             immobility_data.append(is_immobile)
         self.df['is_immobile'] = immobility_data
         return immobility_data
 
     def create_time_bins(self):
         """時間ビンを作成"""
-        start_time = self.df['datetime'].min()
-        end_time = self.df['datetime'].max()
+        start_time = pd.to_datetime(self.df['datetime'].min())
+        # 終端は最後のタイムスタンプに1区間分を加えて余裕を持たせる
+        end_time = pd.to_datetime(self.df['datetime'].max()) + pd.Timedelta(minutes=self.time_interval)
         time_bins = pd.date_range(start=start_time, end=end_time, freq=f'{self.time_interval}min')
         # データを時間ビンに分類
         self.df['time_bin'] = pd.cut(self.df['datetime'], bins=time_bins)
@@ -189,19 +203,21 @@ class BehaviorAnalyzer:
         }).reset_index()
         aggregated.columns = ['time_bin', 'total_movement', 'mean_movement', 'std_movement',
                               'immobility_ratio', 'mean_body_length', 'std_body_length', 'datetime']
-        movement_mask = self.remove_outliers(aggregated['total_movement'])
-        body_length_mask = self.remove_outliers(aggregated['mean_body_length'])
-        aggregated = aggregated[movement_mask & body_length_mask].reset_index(drop=True)
+
+        # 外れ値除去を無効化：全てのデータをそのまま使用
+        # （以前は IQR法で外れ値を検出・除去していましたが、現在は全データを保持）
+
         self.processed_df = aggregated
         return aggregated
 
     def apply_moving_average(self, window=3):
-        """移動平均を適用"""
+        """移動平均を適用（欠損値を無視）"""
         if self.processed_df is None:
             return
-        self.processed_df['movement_ma'] = self.processed_df['total_movement'].rolling(window=window, center=True).mean()
-        self.processed_df['immobility_ma'] = self.processed_df['immobility_ratio'].rolling(window=window, center=True).mean()
-        self.processed_df['body_length_ma'] = self.processed_df['mean_body_length'].rolling(window=window, center=True).mean()
+        # min_periods=1を指定することで、欠損値があっても利用可能なデータで計算
+        self.processed_df['movement_ma'] = self.processed_df['total_movement'].rolling(window=window, center=True, min_periods=1).mean()
+        self.processed_df['immobility_ma'] = self.processed_df['immobility_ratio'].rolling(window=window, center=True, min_periods=1).mean()
+        self.processed_df['body_length_ma'] = self.processed_df['mean_body_length'].rolling(window=window, center=True, min_periods=1).mean()
 
     def _is_daytime(self, dt):
         """指定された時刻が昼間かどうかを判定"""
@@ -246,8 +262,11 @@ class BehaviorAnalyzer:
 
         # 1. 元データ（フレームごと）の詳細CSV
         detailed_df = self.df.copy()
-        detailed_df['movement_threshold'] = detailed_df['body_length'] * 0.01  # 不動判定の閾値
-        detailed_df['is_day'] = detailed_df['datetime'].apply(self._is_daytime)
+        detailed_df['movement_threshold'] = 3.0  # 不動判定の閾値（3ピクセル）
+        # NaTを含む行は昼夜判定をスキップ
+        detailed_df['is_day'] = detailed_df['datetime'].apply(
+            lambda x: self._is_daytime(x) if pd.notna(x) else None
+        )
         raw_csv_path = os.path.join(output_dir, 'detailed_immobility_analysis.csv')
         detailed_df.to_csv(raw_csv_path, index=False)
 
@@ -255,19 +274,25 @@ class BehaviorAnalyzer:
         if self.processed_df is not None:
             aggregated_csv_path = os.path.join(output_dir, 'aggregated_immobility_analysis.csv')
             processed_with_time = self.processed_df.copy()
-            processed_with_time['is_day'] = processed_with_time['datetime'].apply(self._is_daytime)
+            # NaTを含む行は昼夜判定をスキップ
+            processed_with_time['is_day'] = processed_with_time['datetime'].apply(
+                lambda x: self._is_daytime(x) if pd.notna(x) else None
+            )
             processed_with_time['immobility_percentage'] = processed_with_time['immobility_ratio'] * 100
             processed_with_time.to_csv(aggregated_csv_path, index=False)
 
-            # 3. 昼夜別の統計サマリーCSV
-            summary_stats = self._calculate_day_night_stats(processed_with_time)
+            # 3. 昼夜別の統計サマリーCSV（NaTを除外してから計算）
+            valid_data = processed_with_time.dropna(subset=['datetime', 'is_day'])
             summary_csv_path = os.path.join(output_dir, 'day_night_summary.csv')
-            summary_stats.to_csv(summary_csv_path, index=False)
+            if len(valid_data) > 0:
+                summary_stats = self._calculate_day_night_stats(valid_data)
+                summary_stats.to_csv(summary_csv_path, index=False)
 
             print("詳細CSVファイルを保存しました:")
             print(f"  - フレームごとデータ: {raw_csv_path}")
             print(f"  - 時間集約データ: {aggregated_csv_path}")
-            print(f"  - 昼夜別統計: {summary_csv_path}")
+            if len(valid_data) > 0:
+                print(f"  - 昼夜別統計: {summary_csv_path}")
         else:
             print("処理済みデータがないため、集約CSVとサマリーは生成しませんでした。")
 
@@ -316,7 +341,11 @@ class BehaviorAnalyzer:
         try:
             day_start = datetime.strptime(self.day_start_time, '%H:%M').time()
             night_start = datetime.strptime(self.night_start_time, '%H:%M').time()
-            unique_dates = self.processed_df['datetime'].dt.date.unique()
+            # NaTを除外してから日付を取得
+            valid_dates = self.processed_df.dropna(subset=['datetime'])
+            if len(valid_dates) == 0:
+                return
+            unique_dates = valid_dates['datetime'].dt.date.unique()
             for d in unique_dates:
                 night_start_dt = datetime.combine(d, night_start)
                 # 夜の開始時間が昼の開始時間より遅い場合（通常の昼夜）
@@ -335,9 +364,11 @@ class BehaviorAnalyzer:
         ax = plt.gca()
         # 夜間背景を追加
         self._add_night_background(ax)
-        x = self.processed_df['datetime']
-        plt.plot(x, self.processed_df['total_movement'], 'o-', alpha=0.6, label='Raw Data', markersize=3)
-        plt.plot(x, self.processed_df['movement_ma'], 'r-', linewidth=2, label='Moving Average (window=3)')
+        # NaTを含む行を除外
+        plot_df = self.processed_df.dropna(subset=['datetime'])
+        x = plot_df['datetime']
+        plt.plot(x, plot_df['total_movement'], 'o-', alpha=0.6, label='Raw Data', markersize=3)
+        plt.plot(x, plot_df['movement_ma'], 'r-', linewidth=2, label='Moving Average (window=1)')
         plt.xlabel('Time')
         plt.ylabel(f'Movement per {self.time_interval} minutes (pixels)')
         plt.title(f'Animal Movement Over Time ({self.time_interval}-minute intervals)')
@@ -357,9 +388,11 @@ class BehaviorAnalyzer:
         ax = plt.gca()
         # 夜間背景を追加
         self._add_night_background(ax)
-        x = self.processed_df['datetime']
-        plt.plot(x, self.processed_df['immobility_ratio'] * 100, 'o-', alpha=0.6, label='Raw Data', markersize=3)
-        plt.plot(x, self.processed_df['immobility_ma'] * 100, 'g-', linewidth=2, label='Moving Average (window=3)')
+        # NaTを含む行を除外
+        plot_df = self.processed_df.dropna(subset=['datetime'])
+        x = plot_df['datetime']
+        plt.plot(x, plot_df['immobility_ratio'] * 100, 'o-', alpha=0.6, label='Raw Data', markersize=3)
+        plt.plot(x, plot_df['immobility_ma'] * 100, 'g-', linewidth=2, label='Moving Average (window=1)')
         plt.xlabel('Time')
         plt.ylabel(f'Immobility Ratio per {self.time_interval} minutes (%)')
         plt.title(f'Animal Immobility Ratio Over Time ({self.time_interval}-minute intervals)')
@@ -380,11 +413,13 @@ class BehaviorAnalyzer:
         ax = plt.gca()
         # 夜間背景を追加
         self._add_night_background(ax)
-        x = self.processed_df['datetime']
-        plt.plot(x, self.processed_df['mean_body_length'], 'o-', alpha=0.6, label='Raw Data', markersize=3)
-        plt.plot(x, self.processed_df['body_length_ma'], 'purple', linewidth=2, label='Moving Average (window=3)')
-        plt.errorbar(x, self.processed_df['mean_body_length'],
-                     yerr=self.processed_df['std_body_length'],
+        # NaTを含む行を除外
+        plot_df = self.processed_df.dropna(subset=['datetime'])
+        x = plot_df['datetime']
+        plt.plot(x, plot_df['mean_body_length'], 'o-', alpha=0.6, label='Raw Data', markersize=3)
+        plt.plot(x, plot_df['body_length_ma'], 'purple', linewidth=2, label='Moving Average (window=1)')
+        plt.errorbar(x, plot_df['mean_body_length'],
+                     yerr=plot_df['std_body_length'],
                      alpha=0.3, capsize=2, label='Standard Deviation')
         plt.xlabel('Time')
         plt.ylabel('Body Length (pixels)')
@@ -401,24 +436,26 @@ class BehaviorAnalyzer:
     def _plot_combined(self, output_dir):
         """統合プロット（3つのグラフを縦に並べる）"""
         fig, axes = plt.subplots(3, 1, sharex=True, figsize=(12, 10))
-        x = self.processed_df['datetime']
+        # NaTを含む行を除外
+        plot_df = self.processed_df.dropna(subset=['datetime'])
+        x = plot_df['datetime']
         # 各サブプロットに夜間背景を追加
         for ax in axes:
             self._add_night_background(ax)
         # 1. 移動量
-        axes[0].plot(x, self.processed_df['total_movement'], 'o-', alpha=0.6, markersize=2)
-        axes[0].plot(x, self.processed_df['movement_ma'], 'r-', linewidth=2)
+        axes[0].plot(x, plot_df['total_movement'], 'o-', alpha=0.6, markersize=2)
+        axes[0].plot(x, plot_df['movement_ma'], 'r-', linewidth=2)
         axes[0].set_ylabel(f'Movement\n({self.time_interval}min intervals)')
         axes[0].set_title('Animal Behavior Analysis')
         axes[0].grid(True, alpha=0.3)
         # 2. 不動割合
-        axes[1].plot(x, self.processed_df['immobility_ratio'] * 100, 'o-', alpha=0.6, markersize=2)
-        axes[1].plot(x, self.processed_df['immobility_ma'] * 100, 'g-', linewidth=2)
+        axes[1].plot(x, plot_df['immobility_ratio'] * 100, 'o-', alpha=0.6, markersize=2)
+        axes[1].plot(x, plot_df['immobility_ma'] * 100, 'g-', linewidth=2)
         axes[1].set_ylabel('Immobility Ratio (%)')
         axes[1].grid(True, alpha=0.3)
         # 3. 体長
-        axes[2].plot(x, self.processed_df['mean_body_length'], 'o-', alpha=0.6, markersize=2)
-        axes[2].plot(x, self.processed_df['body_length_ma'], 'purple', linewidth=2)
+        axes[2].plot(x, plot_df['mean_body_length'], 'o-', alpha=0.6, markersize=2)
+        axes[2].plot(x, plot_df['body_length_ma'], 'purple', linewidth=2)
         axes[2].set_ylabel('Body Length (pixels)')
         axes[2].set_xlabel('Time')
         axes[2].grid(True, alpha=0.3)
@@ -461,7 +498,8 @@ def main():
     # 時間設定を読み込み（存在すれば）
     day_start_time = '07:00'
     night_start_time = '19:00'
-    measurement_start_time = '09:00:00' # 追加
+    measurement_start_time = '09:00:00'
+    measurement_date_str = None
     config_path = os.path.join(csv_dir, 'time_config.json')
     if os.path.exists(config_path):
         try:
@@ -469,19 +507,33 @@ def main():
                 time_config = json.load(f)
                 day_start_time = time_config.get('day_start_time', day_start_time)
                 night_start_time = time_config.get('night_start_time', night_start_time)
-                measurement_start_time = time_config.get('measurement_start_time', '09:00:00') # 追加
+                measurement_start_time = time_config.get('measurement_start_time', '09:00:00')
+                measurement_date_str = time_config.get('measurement_date', None)
             print(f"時間設定を読み込みました: 昼 {day_start_time}, 夜 {night_start_time}, 測定開始 {measurement_start_time}")
+            if measurement_date_str:
+                print(f"測定日付: {measurement_date_str}")
         except Exception as e:
             print(f"時間設定の読み込みに失敗しました: {e}, デフォルト値を使用します")
     else:
         print("時間設定ファイルが見つかりません。デフォルト値を使用します")
-        measurement_start_time = '09:00:00' # デフォルト値
+        measurement_start_time = '09:00:00'
+
+    # 測定日付を変換
+    measurement_date = None
+    if measurement_date_str:
+        try:
+            from datetime import datetime
+            measurement_date = datetime.strptime(measurement_date_str, '%Y-%m-%d').date()
+        except ValueError:
+            print(f"日付の形式が正しくありません: {measurement_date_str}")
+            measurement_date = None
 
     # 解析器を初期化（10分間隔で解析、時間設定を適用）
     analyzer = BehaviorAnalyzer(csv_path, time_interval_minutes=10,
                                 day_start_time=day_start_time,
                                 night_start_time=night_start_time,
-                                measurement_start_time=measurement_start_time)
+                                measurement_start_time=measurement_start_time,
+                                measurement_date=measurement_date)
 
     # データ読み込みと前処理
     if not analyzer.load_data():
@@ -494,8 +546,8 @@ def main():
     # 時間ビンごとに集約
     analyzer.aggregate_by_time()
 
-    # 移動平均を適用
-    analyzer.apply_moving_average(window=3)
+    # 移動平均を適用（10分間隔の移動平均）
+    analyzer.apply_moving_average(window=1)
 
     # グラフ作成（figuresフォルダに保存）
     analyzer.create_plots(output_dir)
