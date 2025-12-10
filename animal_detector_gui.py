@@ -192,6 +192,12 @@ def binarize(image, method='adaptive', relative_thresh=0.1, block_size=11, c_val
         gray = remove_background_simple(image, bg_kernel_size)
 
     if method == 'adaptive':
+        # block_sizeを検証・修正（奇数かつ3以上）
+        if block_size <= 1:
+            block_size = 3
+        elif block_size % 2 == 0:
+            block_size += 1  # 偶数の場合は奇数にする
+
         # 適応的二値化（動物が暗い場合はTHRESH_BINARY_INVを使用）
         binary = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                                      cv2.THRESH_BINARY_INV, block_size, c_value)
@@ -1452,4 +1458,15 @@ class AnimalDetectorGUI:
 
         # すぐに プレビューを更新
         self.root.after(100, self.update_preview)
+
+
+def main():
+    """メイン関数 - GUIアプリケーションを起動"""
+    root = tk.Tk()
+    app = AnimalDetectorGUI(root)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
 
