@@ -34,6 +34,19 @@
 接触先
 - レポジトリ内の `README.md` を参照してドメイン知識を確認してください。
 
+条件
+- 個体は常に1匹であると仮定します。
+- 昼の画像と夜の画像があり、夜間はかなり検出しづらいです。
+
+コード修正後に以下のエラーが出がちなので、回避
+発生場所 行:1 文字:48
++ cd C:\Users\Shinichi\PycharmProjects\Planarian && python -c "with ope ...
++                                                ~~
+トークン '&&' は、このバージョンでは有効なステートメント区切りではありません。
+    + CategoryInfo          : ParserError: (:) [], ParentContainsErrorRecordException
+    + FullyQualifiedErrorId : InvalidEndOfLine
+
+
 ---
 
 以上を基に Copilot を使って補完や変更を行ってください。問題が不明瞭な場合は、まず小さい修正を提案してから適用することを推奨します。

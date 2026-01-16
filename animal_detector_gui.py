@@ -16,11 +16,14 @@ from datetime import datetime, time
 import json
 
 """
-todo filtering後に最大のparticleを個体とした方がよさそう。 (たいていのオブジェクトはfilter outできる。) 
-おそらく現状は中央に最も近いものが選択されている。
-rolling ballがうまくいっていない感じなので、Image Jと何が違うのかを調べて改良
+プラナリア（または他の小動物）の自動検出・追跡システム
 
-Readmeの書き直し
+主な機能:
+- 画像からの個体検出（二値化・輪郭検出）
+- 形状測定（重心、面積、長軸・短軸、真円度）
+- 時系列グラフの自動生成
+- ROI（関心領域）設定による検出範囲の制限
+- 夜間誤検出対策（相対閾値、ノイズフィルタ、モルフォロジー処理）
 """
 
 def create_temporal_median_background(image_paths, num_frames=100):
@@ -228,7 +231,60 @@ def calc_threshold_by_histogram(image, std_factor=2.0):
 # binarize関数のthresh引数を自動計算に変更
 # std_factorは昼夜で別々に指定可能にする
 
-def binarize(image, method='adaptive', relative_thresh=0.1, block_size=11, c_value=2, use_bg_removal=False, bg_kernel_size=50, roi_coordinates=None, auto_night_contrast=False, night_brightness_threshold=50):
+def enhance_detection_with_edges(gray_image, use_edge_enhancement=False, edge_weight=0.3):
+    """
+    エッジ検出を用いて個体の輪郭を強調
+
+    Args:
+        gray_image: グレースケール画像
+        use_edge_enhancement: エッジ強調を使用するか
+        edge_weight: エッジの重み（0.0-1.0）
+
+    Returns:
+        enhanced_image: エッジ強調後の画像
+    """
+    if not use_edge_enhancement:
+        return gray_image
+
+    # Sobelフィルタでエッジ検出
+    sobelx = cv2.Sobel(gray_image, cv2.CV_64F, 1, 0, ksize=3)
+    sobely = cv2.Sobel(gray_image, cv2.CV_64F, 0, 1, ksize=3)
+
+    # エッジの強度を計算
+    edge_magnitude = np.sqrt(sobelx**2 + sobely**2)
+    edge_magnitude = np.uint8(edge_magnitude / edge_magnitude.max() * 255)
+
+    # 元画像とエッジを合成
+    enhanced = cv2.addWeighted(gray_image, 1.0, edge_magnitude, edge_weight, 0)
+
+    return enhanced
+
+def adaptive_histogram_equalization(image, clip_limit=2.0, tile_grid_size=(8, 8)):
+    """
+    適応的ヒストグラム平坦化（CLAHE）を適用
+
+    Args:
+        image: 入力画像
+        clip_limit: クリップ制限
+        tile_grid_size: タイルグリッドサイズ
+
+    Returns:
+        equalized_image: 平坦化後の画像
+    """
+    if len(image.shape) == 3:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = image.copy()
+
+    clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_grid_size)
+    equalized = clahe.apply(gray)
+
+    if len(image.shape) == 3:
+        equalized = cv2.cvtColor(equalized, cv2.COLOR_GRAY2BGR)
+
+    return equalized
+
+def binarize(image, method='adaptive', relative_thresh=0.1, block_size=11, c_value=2, use_bg_removal=False, bg_kernel_size=50, roi_coordinates=None, auto_night_contrast=False, night_brightness_threshold=50, use_edge_enhancement=False, edge_weight=0.3):
     """
     統一的な二値化関数（ROIマスクと夜間自動コントラスト調整対応）
 
@@ -259,6 +315,13 @@ def binarize(image, method='adaptive', relative_thresh=0.1, block_size=11, c_val
 
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
+    # ノイズ軽減のためにガウシアンブラーを適用（夜間の誤検出対策）
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+
+    # エッジ強調（オプション）
+    if use_edge_enhancement:
+        gray = enhance_detection_with_edges(gray, use_edge_enhancement=True, edge_weight=edge_weight)
+
     # バックグラウンド除去（オプション）
     if use_bg_removal:
         gray = remove_background_simple(image, bg_kernel_size)
@@ -282,19 +345,28 @@ def binarize(image, method='adaptive', relative_thresh=0.1, block_size=11, c_val
         thresh = int(relative_thresh * 255) if relative_thresh <= 1.0 else int(relative_thresh)
         _, binary = cv2.threshold(gray, thresh, 255, cv2.THRESH_BINARY_INV)
 
+    # モルフォロジー処理でノイズを除去（夜間の誤検出対策）
+    # Opening: 小さなノイズを除去
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1)
+
+    # Closing: 小さな穴を埋める
+    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=1)
+
     # 二値化後にも ROI マスクを適用して、ROI 外を確実に 0 にする
     if roi_coordinates is not None:
         binary = apply_roi_mask(binary, roi_coordinates)
 
     return binary
 
-def analyze(binary, min_area=100, max_area=10000, select_center_only=True, select_largest=False, scale_factor=1.0, roi_offset_x=0, roi_offset_y=0):
+def analyze(binary, min_area=100, max_area=10000, select_center_only=True, select_largest=False, scale_factor=1.0, roi_offset_x=0, roi_offset_y=0, min_circularity=0.3):
     """
     個体検出・解析関数（改良版）
 
     Args:
         select_largest: Trueの場合、最大面積かつ最も中心に近い個体を選択
         select_center_only: Trueの場合、中心に最も近い個体を選択（select_largestがFalseの時のみ）
+        min_circularity: 最小真円度（0.0-1.0）、これ以下のオブジェクトは除外（ノイズフィルタ）
     """
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     results = []
@@ -326,7 +398,17 @@ def analyze(binary, min_area=100, max_area=10000, select_center_only=True, selec
             (x, y), (MA, ma), angle = cv2.fitEllipse(cnt)
         else:
             MA, ma = 0, 0
-        circularity = 4 * np.pi * area / (cv2.arcLength(cnt, True) ** 2)
+
+        # 真円度を計算（ノイズフィルタ用）
+        perimeter = cv2.arcLength(cnt, True)
+        if perimeter > 0:
+            circularity = 4 * np.pi * area / (perimeter ** 2)
+        else:
+            circularity = 0
+
+        # 真円度フィルタ: 細長いノイズや不規則な形状を除外
+        if circularity < min_circularity:
+            continue
 
         # 実際の画像サイズに換算した値を保存（ROIオフセットを加算）
         actual_area = area / (scale_factor ** 2)
@@ -376,7 +458,7 @@ class AnimalDetectorGUI:
     def __init__(self, root):
         self.root = root
         self.root.title('動物検出GUI')
-        self.root.geometry('1200x550')  # サイズをさらに縦に短く調整（650→550）
+        self.root.geometry('1200x500')  # サイズをコンパクトに調整
 
         # ウィンドウを最大化可能にする（OS別に安全に処理）
         try:
@@ -448,6 +530,10 @@ class AnimalDetectorGUI:
         self.use_clahe = tk.BooleanVar(value=False)  # CLAHE（局所適応ヒストグラム平坦化）の使用
         self.clahe_clip_limit = tk.DoubleVar(value=3.0)  # CLAHEのクリップ制限
 
+        # エッジ強調設定を追加
+        self.use_edge_enhancement = tk.BooleanVar(value=False)  # エッジ強調の使用
+        self.edge_weight = tk.DoubleVar(value=0.3)  # エッジの重み（0.0-1.0）
+
         self.create_widgets()
 
     def create_widgets(self):
@@ -459,180 +545,158 @@ class AnimalDetectorGUI:
         left_frame = tk.Frame(main_frame)
         left_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
 
-        # フォルダ選択（コンパクト化）
-        tk.Label(left_frame, text='画像フォルダ:', font=('Arial', 9, 'bold')).grid(row=0, column=0, sticky='w', pady=(2,0))
+        # フォルダ選択（1行に統合）
         folder_frame = tk.Frame(left_frame)
-        folder_frame.grid(row=1, column=0, columnspan=2, pady=1, sticky='ew')
-        tk.Entry(folder_frame, textvariable=self.folder_path, width=35, font=('Arial', 8)).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        tk.Button(folder_frame, text='選択', command=self.select_folder, font=('Arial', 8), width=6).pack(side=tk.RIGHT, padx=(2,0))
+        folder_frame.grid(row=0, column=0, columnspan=2, pady=1, sticky='ew')
+        tk.Label(folder_frame, text='フォルダ:', font=('Arial', 7, 'bold')).pack(side=tk.LEFT, padx=(0,2))
+        tk.Entry(folder_frame, textvariable=self.folder_path, width=28, font=('Arial', 7)).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Button(folder_frame, text='選択', command=self.select_folder, font=('Arial', 7), width=5).pack(side=tk.RIGHT, padx=(2,0))
 
-        # 昼・夜の代表画像（2列レイアウト）
-        tk.Label(left_frame, text='代表画像:', font=('Arial', 9, 'bold')).grid(row=2, column=0, sticky='w', pady=(3,0))
+        # 昼・夜の代表画像（1行に統合）
         images_frame = tk.Frame(left_frame)
-        images_frame.grid(row=3, column=0, columnspan=2, pady=1, sticky='ew')
+        images_frame.grid(row=1, column=0, columnspan=2, pady=1, sticky='ew')
 
-        # 左列：昼の代表画像
-        day_column = tk.Frame(images_frame)
-        day_column.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0,2))
-        tk.Label(day_column, text='昼:', font=('Arial', 8)).pack(anchor='w')
-        day_frame = tk.Frame(day_column)
-        day_frame.pack(fill=tk.X)
-        tk.Entry(day_frame, textvariable=self.day_img_path, width=18, font=('Arial', 8)).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        tk.Button(day_frame, text='選択', command=self.select_day_image, font=('Arial', 8), width=4).pack(side=tk.RIGHT, padx=(2,0))
+        # 昼の代表画像
+        tk.Label(images_frame, text='昼:', font=('Arial', 7, 'bold')).pack(side=tk.LEFT, padx=(0,1))
+        tk.Entry(images_frame, textvariable=self.day_img_path, width=13, font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
+        tk.Button(images_frame, text='選択', command=self.select_day_image, font=('Arial', 7), width=4).pack(side=tk.LEFT, padx=(1,3))
 
-        # 右列：夜の代表画像
-        night_column = tk.Frame(images_frame)
-        night_column.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2,0))
-        tk.Label(night_column, text='夜:', font=('Arial', 8)).pack(anchor='w')
-        night_frame = tk.Frame(night_column)
-        night_frame.pack(fill=tk.X)
-        tk.Entry(night_frame, textvariable=self.night_img_path, width=18, font=('Arial', 8)).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        tk.Button(night_frame, text='選択', command=self.select_night_image, font=('Arial', 8), width=4).pack(side=tk.RIGHT, padx=(2,0))
+        # 夜の代表画像
+        tk.Label(images_frame, text='夜:', font=('Arial', 7, 'bold')).pack(side=tk.LEFT, padx=(0,1))
+        tk.Entry(images_frame, textvariable=self.night_img_path, width=13, font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
+        tk.Button(images_frame, text='選択', command=self.select_night_image, font=('Arial', 7), width=4).pack(side=tk.LEFT, padx=1)
 
-        # 個体選択方法設定を追加
-        selection_frame = tk.LabelFrame(left_frame, text='Individual Selection Method', font=('Arial', 8, 'bold'))
-        selection_frame.grid(row=4, column=0, columnspan=2, pady=3, padx=5, sticky='ew')
+        # 個体選択方法設定
+        selection_frame = tk.LabelFrame(left_frame, text='検出設定', font=('Arial', 7, 'bold'))
+        selection_frame.grid(row=2, column=0, columnspan=2, pady=2, padx=5, sticky='ew')
 
         selection_row = tk.Frame(selection_frame)
-        selection_row.pack(pady=2)
-        tk.Checkbutton(selection_row, text='Select Largest Particle', variable=self.select_largest, font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
-        tk.Checkbutton(selection_row, text='Constant Darkness', variable=self.constant_darkness,
-                      command=self.toggle_constant_darkness, font=('Arial', 7)).pack(side=tk.LEFT, padx=(10,1))
+        selection_row.pack(pady=1)
+        tk.Checkbutton(selection_row, text='Largest', variable=self.select_largest, font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
+        tk.Checkbutton(selection_row, text='Const.Dark', variable=self.constant_darkness,
+                      command=self.toggle_constant_darkness, font=('Arial', 7)).pack(side=tk.LEFT, padx=(5,1))
 
-        # パラメータ設定（さらにコンパクト化）
-        param_frame = tk.LabelFrame(left_frame, text='パラメータ設定', font=('Arial', 8, 'bold'))
-        param_frame.grid(row=5, column=0, columnspan=2, pady=3, padx=5, sticky='ew')
+        # パラメータ設定
+        param_frame = tk.LabelFrame(left_frame, text='面積範囲', font=('Arial', 7, 'bold'))
+        param_frame.grid(row=3, column=0, columnspan=2, pady=2, padx=5, sticky='ew')
 
         size_frame = tk.Frame(param_frame)
         size_frame.pack(pady=1)
-        tk.Label(size_frame, text='最小面積:', font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
-        tk.Entry(size_frame, textvariable=self.min_area, width=6, font=('Arial', 8)).pack(side=tk.LEFT)
-        tk.Label(size_frame, text='最大面積:', font=('Arial', 7)).pack(side=tk.LEFT, padx=(5,1))
-        tk.Entry(size_frame, textvariable=self.max_area, width=6, font=('Arial', 8)).pack(side=tk.LEFT)
+        tk.Label(size_frame, text='最小:', font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
+        tk.Entry(size_frame, textvariable=self.min_area, width=6, font=('Arial', 7)).pack(side=tk.LEFT)
+        tk.Label(size_frame, text='最大:', font=('Arial', 7)).pack(side=tk.LEFT, padx=(5,1))
+        tk.Entry(size_frame, textvariable=self.max_area, width=6, font=('Arial', 7)).pack(side=tk.LEFT)
         tk.Button(size_frame, text='更新', command=self.update_preview,
                  bg='lightblue', font=('Arial', 7), width=6).pack(side=tk.LEFT, padx=(5,0))
 
-        # 時間設定（1行にまとめる）
-        time_frame = tk.LabelFrame(left_frame, text='時間設定', font=('Arial', 8, 'bold'))
-        time_frame.grid(row=6, column=0, columnspan=2, pady=3, padx=5, sticky='ew')
+        # 時間設定
+        time_frame = tk.LabelFrame(left_frame, text='時間', font=('Arial', 7, 'bold'))
+        time_frame.grid(row=4, column=0, columnspan=2, pady=2, padx=5, sticky='ew')
 
         time_entry_frame = tk.Frame(time_frame)
-        time_entry_frame.pack(pady=2)
-        tk.Label(time_entry_frame, text='昼開始:', font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
-        tk.Entry(time_entry_frame, textvariable=self.day_start_time, width=5, font=('Arial', 8)).pack(side=tk.LEFT, padx=1)
-        tk.Label(time_entry_frame, text='夜開始:', font=('Arial', 7)).pack(side=tk.LEFT, padx=(5,1))
-        tk.Entry(time_entry_frame, textvariable=self.night_start_time, width=5, font=('Arial', 8)).pack(side=tk.LEFT, padx=1)
-        tk.Label(time_entry_frame, text='測定開始:', font=('Arial', 7)).pack(side=tk.LEFT, padx=(5,1))
-        tk.Entry(time_entry_frame, textvariable=self.measurement_start_time, width=8, font=('Arial', 8)).pack(side=tk.LEFT, padx=1)
+        time_entry_frame.pack(pady=1)
+        tk.Label(time_entry_frame, text='昼:', font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
+        tk.Entry(time_entry_frame, textvariable=self.day_start_time, width=5, font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
+        tk.Label(time_entry_frame, text='夜:', font=('Arial', 7)).pack(side=tk.LEFT, padx=(3,1))
+        tk.Entry(time_entry_frame, textvariable=self.night_start_time, width=5, font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
+        tk.Label(time_entry_frame, text='測定:', font=('Arial', 7)).pack(side=tk.LEFT, padx=(3,1))
+        tk.Entry(time_entry_frame, textvariable=self.measurement_start_time, width=7, font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
 
-        # 2行目：測定開始日付
-        date_entry_frame = tk.Frame(time_frame)
-        date_entry_frame.pack(pady=2)
-        tk.Label(date_entry_frame, text='測定日付 (YYYY-MM-DD):', font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
-        tk.Entry(date_entry_frame, textvariable=self.measurement_date, width=12, font=('Arial', 8)).pack(side=tk.LEFT, padx=1)
-
-        # Temporal Median Filter設定（ステータスを右に移動）
-        temporal_frame = tk.LabelFrame(left_frame, text='Temporal Median Filter', font=('Arial', 8, 'bold'))
-        temporal_frame.grid(row=7, column=0, columnspan=2, pady=3, padx=5, sticky='ew')
+        # Temporal Median Filter設定
+        temporal_frame = tk.LabelFrame(left_frame, text='背景除去', font=('Arial', 7, 'bold'))
+        temporal_frame.grid(row=5, column=0, columnspan=2, pady=2, padx=5, sticky='ew')
 
         temporal_row = tk.Frame(temporal_frame)
-        temporal_row.pack(pady=2)
+        temporal_row.pack(pady=1)
         tk.Checkbutton(temporal_row, text='使用', variable=self.use_temporal_median, font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
-        tk.Label(temporal_row, text='フレーム数:', font=('Arial', 7)).pack(side=tk.LEFT, padx=(5,1))
-        tk.Entry(temporal_row, textvariable=self.temporal_frames, width=5, font=('Arial', 8)).pack(side=tk.LEFT, padx=1)
-        tk.Button(temporal_row, text='背景作成', command=self.create_background,
-                 bg='lightyellow', font=('Arial', 7), width=8).pack(side=tk.LEFT, padx=(5,0))
-        self.temporal_status_label = tk.Label(temporal_row, text='背景未作成', font=('Arial', 6))
-        self.temporal_status_label.pack(side=tk.LEFT, padx=(5,0))
+        tk.Label(temporal_row, text='F:', font=('Arial', 7)).pack(side=tk.LEFT, padx=(3,1))
+        tk.Entry(temporal_row, textvariable=self.temporal_frames, width=4, font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
+        tk.Button(temporal_row, text='作成', command=self.create_background,
+                 bg='lightyellow', font=('Arial', 7), width=5).pack(side=tk.LEFT, padx=(3,0))
+        self.temporal_status_label = tk.Label(temporal_row, text='未作成', font=('Arial', 6))
+        self.temporal_status_label.pack(side=tk.LEFT, padx=(3,0))
 
-        # 動画保存設定（コンパクト化）
-        video_frame = tk.LabelFrame(left_frame, text='動画保存設定', font=('Arial', 8, 'bold'))
-        video_frame.grid(row=8, column=0, columnspan=2, pady=3, padx=5, sticky='ew')
+        # 動画保存設定
+        video_frame = tk.LabelFrame(left_frame, text='動画', font=('Arial', 7, 'bold'))
+        video_frame.grid(row=6, column=0, columnspan=2, pady=2, padx=5, sticky='ew')
 
-        # 1行にまとめる
         video_row = tk.Frame(video_frame)
-        video_row.pack(pady=2)
+        video_row.pack(pady=1)
         tk.Checkbutton(video_row, text='保存', variable=self.save_video, font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
-        tk.Label(video_row, text='FPS:', font=('Arial', 7)).pack(side=tk.LEFT, padx=(5,1))
-        tk.Entry(video_row, textvariable=self.video_fps, width=3, font=('Arial', 8)).pack(side=tk.LEFT, padx=1)
-        tk.Label(video_row, text='スケール:', font=('Arial', 7)).pack(side=tk.LEFT, padx=(5,1))
-        tk.Entry(video_row, textvariable=self.video_scale, width=4, font=('Arial', 8)).pack(side=tk.LEFT, padx=1)
+        tk.Label(video_row, text='FPS:', font=('Arial', 7)).pack(side=tk.LEFT, padx=(3,1))
+        tk.Entry(video_row, textvariable=self.video_fps, width=3, font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
+        tk.Label(video_row, text='Scale:', font=('Arial', 7)).pack(side=tk.LEFT, padx=(3,1))
+        tk.Entry(video_row, textvariable=self.video_scale, width=4, font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
 
-        # 二値化設定（コンパクト化）
-        binarize_frame = tk.LabelFrame(left_frame, text='二値化設定', font=('Arial', 8, 'bold'))
-        binarize_frame.grid(row=9, column=0, columnspan=2, pady=3, padx=5, sticky='ew')
+        # 二値化設定
+        binarize_frame = tk.LabelFrame(left_frame, text='二値化', font=('Arial', 7, 'bold'))
+        binarize_frame.grid(row=7, column=0, columnspan=2, pady=2, padx=5, sticky='ew')
 
-        # 3列に分けてよりコンパクトに
-        tk.Label(binarize_frame, text='メソッド:', font=('Arial', 7)).grid(row=0, column=0, padx=1, pady=1, sticky='w')
-        ttk.Combobox(binarize_frame, textvariable=self.binarize_method, values=['adaptive', 'relative', 'fixed'], state='readonly', width=6, font=('Arial', 7)).grid(row=0, column=1, padx=1, pady=1)
-        tk.Label(binarize_frame, text='定数C:', font=('Arial', 7)).grid(row=0, column=2, padx=(5,1), pady=1, sticky='w')
-        tk.Entry(binarize_frame, textvariable=self.c_value, width=5, font=('Arial', 8)).grid(row=0, column=3, padx=1, pady=1)
-        tk.Label(binarize_frame, text='BG除去:', font=('Arial', 7)).grid(row=0, column=4, padx=(5,1), pady=1, sticky='w')
-        ttk.Combobox(binarize_frame, textvariable=self.use_bg_removal, values=[True, False], state='readonly', width=4, font=('Arial', 7)).grid(row=0, column=5, padx=1, pady=1)
+        # 2行に分けてコンパクトに
+        tk.Label(binarize_frame, text='方式:', font=('Arial', 6)).grid(row=0, column=0, padx=1, pady=1, sticky='w')
+        ttk.Combobox(binarize_frame, textvariable=self.binarize_method, values=['adaptive', 'relative', 'fixed'], state='readonly', width=7, font=('Arial', 7)).grid(row=0, column=1, padx=1, pady=1)
+        tk.Label(binarize_frame, text='C:', font=('Arial', 6)).grid(row=0, column=2, padx=(3,1), pady=1, sticky='w')
+        tk.Entry(binarize_frame, textvariable=self.c_value, width=4, font=('Arial', 7)).grid(row=0, column=3, padx=1, pady=1)
+        tk.Label(binarize_frame, text='BG:', font=('Arial', 6)).grid(row=0, column=4, padx=(3,1), pady=1, sticky='w')
+        ttk.Combobox(binarize_frame, textvariable=self.use_bg_removal, values=[True, False], state='readonly', width=5, font=('Arial', 7)).grid(row=0, column=5, padx=1, pady=1)
 
-        tk.Label(binarize_frame, text='相対閾値:', font=('Arial', 7)).grid(row=1, column=0, padx=1, pady=1, sticky='w')
-        tk.Entry(binarize_frame, textvariable=self.relative_thresh, width=6, font=('Arial', 8)).grid(row=1, column=1, padx=1, pady=1)
-        tk.Label(binarize_frame, text='ブロック:', font=('Arial', 7)).grid(row=1, column=2, padx=(5,1), pady=1, sticky='w')
-        tk.Entry(binarize_frame, textvariable=self.block_size, width=5, font=('Arial', 8)).grid(row=1, column=3, padx=1, pady=1)
-        tk.Label(binarize_frame, text='BGカーネル:', font=('Arial', 7)).grid(row=1, column=4, padx=(5,1), pady=1, sticky='w')
-        tk.Entry(binarize_frame, textvariable=self.bg_kernel_size, width=4, font=('Arial', 8)).grid(row=1, column=5, padx=1, pady=1)
+        tk.Label(binarize_frame, text='閾値:', font=('Arial', 6)).grid(row=1, column=0, padx=1, pady=1, sticky='w')
+        tk.Entry(binarize_frame, textvariable=self.relative_thresh, width=5, font=('Arial', 7)).grid(row=1, column=1, padx=1, pady=1)
+        tk.Label(binarize_frame, text='Block:', font=('Arial', 6)).grid(row=1, column=2, padx=(3,1), pady=1, sticky='w')
+        tk.Entry(binarize_frame, textvariable=self.block_size, width=4, font=('Arial', 7)).grid(row=1, column=3, padx=1, pady=1)
+        tk.Label(binarize_frame, text='Kernel:', font=('Arial', 6)).grid(row=1, column=4, padx=(3,1), pady=1, sticky='w')
+        tk.Entry(binarize_frame, textvariable=self.bg_kernel_size, width=4, font=('Arial', 7)).grid(row=1, column=5, padx=1, pady=1)
 
-        # ROI設定（さらにコンパクト化）
-        roi_frame = tk.LabelFrame(left_frame, text='ROI設定', font=('Arial', 8, 'bold'))
-        roi_frame.grid(row=10, column=0, columnspan=2, pady=3, padx=5, sticky='ew')
+        # ROI設定
+        roi_frame = tk.LabelFrame(left_frame, text='ROI', font=('Arial', 7, 'bold'))
+        roi_frame.grid(row=8, column=0, columnspan=2, pady=2, padx=5, sticky='ew')
 
         roi_control_frame = tk.Frame(roi_frame)
-        roi_control_frame.pack(pady=2)
-        tk.Checkbutton(roi_control_frame, text='ROI使用', variable=self.roi_active,
+        roi_control_frame.pack(pady=1)
+        tk.Checkbutton(roi_control_frame, text='使用', variable=self.roi_active,
                       command=self.toggle_roi, font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
         tk.Button(roi_control_frame, text='設定', command=self.set_roi_mode,
-                 bg='orange', font=('Arial', 7), width=6).pack(side=tk.LEFT, padx=2)
+                 bg='orange', font=('Arial', 7), width=5).pack(side=tk.LEFT, padx=2)
         tk.Button(roi_control_frame, text='クリア', command=self.clear_roi,
-                 bg='lightgray', font=('Arial', 7), width=6).pack(side=tk.LEFT, padx=1)
+                 bg='lightgray', font=('Arial', 7), width=5).pack(side=tk.LEFT, padx=1)
+        self.roi_info_label = tk.Label(roi_control_frame, text='未設定', font=('Arial', 6))
+        self.roi_info_label.pack(side=tk.LEFT, padx=(3,0))
 
-        self.roi_info_label = tk.Label(roi_frame, text='ROI未設定', font=('Arial', 6))
-        self.roi_info_label.pack(pady=(0,2))
+        # コントラスト調整設定
+        contrast_frame = tk.LabelFrame(left_frame, text='画像強調', font=('Arial', 7, 'bold'))
+        contrast_frame.grid(row=9, column=0, columnspan=2, pady=2, padx=5, sticky='ew')
 
-        # コントラスト調整設定を追加
-        contrast_frame = tk.LabelFrame(left_frame, text='コントラスト調整', font=('Arial', 8, 'bold'))
-        contrast_frame.grid(row=11, column=0, columnspan=2, pady=3, padx=5, sticky='ew')
-
-        # 1行目：基本設定
+        # 1行目
         contrast_row1 = tk.Frame(contrast_frame)
-        contrast_row1.pack(pady=2)
-        tk.Checkbutton(contrast_row1, text='使用', variable=self.use_contrast_enhancement,
-                      command=self.update_preview, font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
-        tk.Label(contrast_row1, text='倍率:', font=('Arial', 7)).pack(side=tk.LEFT, padx=(5,1))
-        tk.Entry(contrast_row1, textvariable=self.contrast_alpha, width=4, font=('Arial', 8)).pack(side=tk.LEFT, padx=1)
-        tk.Label(contrast_row1, text='明度:', font=('Arial', 7)).pack(side=tk.LEFT, padx=(5,1))
-        tk.Entry(contrast_row1, textvariable=self.brightness_beta, width=4, font=('Arial', 8)).pack(side=tk.LEFT, padx=1)
+        contrast_row1.pack(pady=1)
+        tk.Checkbutton(contrast_row1, text='Cont', variable=self.use_contrast_enhancement,
+                      command=self.update_preview, font=('Arial', 6)).pack(side=tk.LEFT, padx=1)
+        tk.Entry(contrast_row1, textvariable=self.contrast_alpha, width=3, font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
+        tk.Checkbutton(contrast_row1, text='CLAHE', variable=self.use_clahe,
+                      command=self.update_preview, font=('Arial', 6)).pack(side=tk.LEFT, padx=(3,1))
+        tk.Entry(contrast_row1, textvariable=self.clahe_clip_limit, width=3, font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
+        tk.Checkbutton(contrast_row1, text='Edge', variable=self.use_edge_enhancement,
+                      command=self.update_preview, font=('Arial', 6)).pack(side=tk.LEFT, padx=(3,1))
+        tk.Entry(contrast_row1, textvariable=self.edge_weight, width=3, font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
 
-        # 2行目：CLAHE設定
-        contrast_row2 = tk.Frame(contrast_frame)
-        contrast_row2.pack(pady=1)
-        tk.Checkbutton(contrast_row2, text='CLAHE', variable=self.use_clahe,
-                      command=self.update_preview, font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
-        tk.Label(contrast_row2, text='制限:', font=('Arial', 7)).pack(side=tk.LEFT, padx=(5,1))
-        tk.Entry(contrast_row2, textvariable=self.clahe_clip_limit, width=4, font=('Arial', 8)).pack(side=tk.LEFT, padx=1)
-        tk.Button(contrast_row2, text='プレビュー更新', command=self.update_preview,
-                 bg='lightcyan', font=('Arial', 7), width=10).pack(side=tk.LEFT, padx=(5,0))
-
-        # メインボタン（コンパクト化）
+        # メインボタン
         button_frame = tk.Frame(left_frame)
-        button_frame.grid(row=12, column=0, columnspan=2, pady=3)
+        button_frame.grid(row=10, column=0, columnspan=2, pady=2)
 
-        # 設定保存・ロードボタンを追加
+        # 設定保存・ロードボタン
         config_frame = tk.Frame(button_frame)
         config_frame.pack(pady=1)
-        tk.Button(config_frame, text='設定保存', command=self.save_config,
-                 bg='lightblue', font=('Arial', 8), width=8).pack(side=tk.LEFT, padx=1)
-        tk.Button(config_frame, text='設定ロード', command=self.load_config,
-                 bg='lightyellow', font=('Arial', 8), width=8).pack(side=tk.LEFT, padx=1)
+        tk.Button(config_frame, text='保存', command=self.save_config,
+                 bg='lightblue', font=('Arial', 7), width=7).pack(side=tk.LEFT, padx=1)
+        tk.Button(config_frame, text='ロード', command=self.load_config,
+                 bg='lightyellow', font=('Arial', 7), width=7).pack(side=tk.LEFT, padx=1)
+        tk.Button(config_frame, text='更新', command=self.update_preview,
+                 bg='lightcyan', font=('Arial', 7), width=7).pack(side=tk.LEFT, padx=1)
 
         tk.Button(button_frame, text='解析開始', command=self.start_analysis,
-                 bg='lightgreen', font=('Arial', 10, 'bold'), width=10, height=2).pack(pady=1)
+                 bg='lightgreen', font=('Arial', 9, 'bold'), width=22).pack(pady=2)
         tk.Button(button_frame, text='終了', command=self.root.quit,
-                 bg='lightcoral', font=('Arial', 9), width=10).pack(pady=1)
+                 bg='lightcoral', font=('Arial', 8), width=22).pack(pady=1)
 
         # 右側：プレビューパネル
         right_frame = tk.Frame(main_frame)
@@ -791,7 +855,9 @@ class AnimalDetectorGUI:
                          c_value=self.c_value.get(),
                          use_bg_removal=self.use_bg_removal.get(),
                          bg_kernel_size=self.bg_kernel_size.get(),
-                         roi_coordinates=roi_coords_for_binarize)
+                         roi_coordinates=roi_coords_for_binarize,
+                         use_edge_enhancement=self.use_edge_enhancement.get(),
+                         edge_weight=self.edge_weight.get())
 
         # 検出（スケール比を考慮）
         results, contours = analyze(
@@ -1026,7 +1092,9 @@ class AnimalDetectorGUI:
                              c_value=c_value,
                              use_bg_removal=use_bg_removal,
                              bg_kernel_size=bg_kernel_size,
-                             roi_coordinates=roi_rel_coords)
+                             roi_coordinates=roi_rel_coords,
+                             use_edge_enhancement=self.use_edge_enhancement.get(),
+                             edge_weight=self.edge_weight.get())
 
             # 解析
             results, contours = analyze(
@@ -1528,7 +1596,10 @@ class AnimalDetectorGUI:
             'contrast_alpha': self.contrast_alpha.get(),
             'brightness_beta': self.brightness_beta.get(),
             'use_clahe': self.use_clahe.get(),
-            'clahe_clip_limit': self.clahe_clip_limit.get()
+            'clahe_clip_limit': self.clahe_clip_limit.get(),
+            # エッジ強調設定を追加
+            'use_edge_enhancement': self.use_edge_enhancement.get(),
+            'edge_weight': self.edge_weight.get()
         }
 
         # JSONファイルに保存
@@ -1575,6 +1646,10 @@ class AnimalDetectorGUI:
         self.brightness_beta.set(config.get('brightness_beta', 0))
         self.use_clahe.set(config.get('use_clahe', False))
         self.clahe_clip_limit.set(config.get('clahe_clip_limit', 3.0))
+
+        # エッジ強調設定をロード
+        self.use_edge_enhancement.set(config.get('use_edge_enhancement', False))
+        self.edge_weight.set(config.get('edge_weight', 0.3))
 
         self.log_output(f'設定をロードしました: {file_path}')
 
