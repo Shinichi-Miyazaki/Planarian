@@ -1,5 +1,4 @@
 import tkinter as tk
-import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 from PIL import Image, ImageTk
 import cv2
@@ -24,7 +23,49 @@ import json
 - 時系列グラフの自動生成
 - ROI（関心領域）設定による検出範囲の制限
 - 夜間誤検出対策（相対閾値、ノイズフィルタ、モルフォロジー処理）
+- インタラクティブなターゲット選択による半教師あり検出
 """
+
+# =============================================================================
+# 定数定義（マジックナンバーを避けるため、ここで一元管理）
+# =============================================================================
+
+# フレーム間隔（秒）- 画像は1枚あたり10秒で取得
+FRAME_INTERVAL_SECONDS = 10
+
+# デフォルトパラメータ
+DEFAULT_MIN_AREA = 100
+DEFAULT_MAX_AREA = 10000
+DEFAULT_RELATIVE_THRESH = 0.15
+DEFAULT_BLOCK_SIZE = 15
+DEFAULT_C_VALUE = 8
+DEFAULT_BG_KERNEL_SIZE = 31
+DEFAULT_TEMPORAL_FRAMES = 100
+DEFAULT_VIDEO_FPS = 10
+DEFAULT_VIDEO_SCALE = 0.5
+
+# GUI関連
+FONT_SIZE_SMALL = 8
+FONT_SIZE_NORMAL = 9
+FONT_SIZE_LARGE = 10
+FONT_SIZE_TITLE = 11
+CANVAS_PREVIEW_WIDTH = 350
+CANVAS_PREVIEW_HEIGHT = 250
+
+# 検出パラメータ
+DEFAULT_MIN_CIRCULARITY = 0.3
+DEFAULT_CONTRAST_ALPHA = 1.5
+DEFAULT_CLAHE_CLIP_LIMIT = 3.0
+DEFAULT_EDGE_WEIGHT = 0.3
+
+# 自動背景補正パラメータ
+AUTO_BG_CORRECTION_RADIUS = 15  # 軽量化のため小さく（元は50）
+AUTO_BG_GAUSSIAN_KERNEL = 51
+
+# 内部均一性フィルタパラメータ（プラナリアとノイズの区別用）
+# プラナリアは内部が均一な低輝度、ノイズは内部が不均一
+DEFAULT_MIN_UNIFORMITY = 0.5  # 最小均一性（0.0-1.0、高いほど均一）
+UNIFORMITY_SAMPLE_RATIO = 0.3  # 内部サンプリング比率
 
 def create_temporal_median_background(image_paths, num_frames=100):
     """
@@ -124,6 +165,73 @@ def remove_background_simple(image, kernel_size=50):
     foreground = cv2.subtract(gray, background)
     return foreground
 
+
+def auto_background_correction(image, method='adaptive'):
+    """
+    自動背景補正機能（プラナリア検出に最適化）
+
+    プラナリアの特性：
+    - 背景に対して暗い物体
+    - 辺縁が整っており、凸凹していない
+    - 背景は不均一
+
+    Args:
+        image: 入力画像（BGR形式）
+        method: 補正方法
+            - 'adaptive': 適応的な背景補正（推奨）
+            - 'rolling_ball': Rolling Ball法
+            - 'morphological': モルフォロジー法
+
+    Returns:
+        corrected_image: 背景補正後の画像（グレースケール、コントラスト強調済み）
+        None: エラー時
+    """
+    try:
+        if image is None or image.size == 0:
+            return None
+
+        if len(image.shape) == 3:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = image.copy()
+
+        if method == 'adaptive':
+            # 適応的背景補正：複数スケールで背景を推定
+            # 大きなカーネルで背景を推定
+            bg_large = cv2.GaussianBlur(gray, (AUTO_BG_GAUSSIAN_KERNEL, AUTO_BG_GAUSSIAN_KERNEL), 0)
+
+            # 背景引き算（暗い物体を検出するため、背景から元画像を引く）
+            # プラナリアは暗いので、背景 - 元画像 で明るくなる
+            corrected = cv2.subtract(bg_large, gray)
+
+            # コントラストを正規化
+            corrected = cv2.normalize(corrected, None, 0, 255, cv2.NORM_MINMAX)
+
+        elif method == 'rolling_ball':
+            # Rolling Ball法（OpenCVのモルフォロジー処理で軽量化）
+            # scikit-imageのblack_tophatは重いため、OpenCVで代替
+            kernel_size = AUTO_BG_CORRECTION_RADIUS * 2 + 1
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+            # プラナリアは暗いので、black_tophat（= closing - 元画像）を使用
+            corrected = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel)
+            corrected = cv2.normalize(corrected, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+
+        elif method == 'morphological':
+            # モルフォロジー法：Opening操作で背景を推定（軽量化）
+            kernel_size = AUTO_BG_CORRECTION_RADIUS * 2 + 1
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+            bg_morph = cv2.morphologyEx(gray, cv2.MORPH_OPEN, kernel)
+            corrected = cv2.subtract(bg_morph, gray)
+            corrected = cv2.normalize(corrected, None, 0, 255, cv2.NORM_MINMAX)
+        else:
+            corrected = gray
+
+        return corrected.astype(np.uint8)
+
+    except Exception as e:
+        print(f"auto_background_correction error: {e}")
+        return None
+
 def enhance_contrast(image, use_contrast=False, alpha=1.5, beta=0, use_clahe=False, clip_limit=3.0):
     """
     コントラスト調整関数
@@ -215,6 +323,70 @@ def is_nighttime_by_brightness(image, brightness_threshold=50):
     return mean_brightness <= brightness_threshold
 
 # --- 画像解析関数 ---
+
+def calculate_internal_uniformity(gray_image, contour, sample_ratio=UNIFORMITY_SAMPLE_RATIO):
+    """
+    輪郭内部の均一性を計算（プラナリアとノイズの区別用）
+
+    プラナリアの特性：
+    - 内部が均一な低輝度
+    - 辺縁が整っている
+
+    ノイズの特性：
+    - 内部が不均一
+    - 辺縁が不規則
+
+    Args:
+        gray_image: グレースケール画像
+        contour: 輪郭
+        sample_ratio: 内部サンプリング比率（0.0-1.0）
+
+    Returns:
+        uniformity: 均一性スコア（0.0-1.0、高いほど均一）
+                   -1.0: 計算不可
+    """
+    try:
+        # 輪郭のバウンディングボックスを取得
+        x, y, w, h = cv2.boundingRect(contour)
+
+        if w < 3 or h < 3:
+            return -1.0
+
+        # マスクを作成
+        mask = np.zeros(gray_image.shape, dtype=np.uint8)
+        cv2.drawContours(mask, [contour], -1, 255, -1)
+
+        # 内部のピクセル値を取得
+        roi = gray_image[y:y+h, x:x+w]
+        roi_mask = mask[y:y+h, x:x+w]
+
+        internal_pixels = roi[roi_mask > 0]
+
+        if len(internal_pixels) < 5:
+            return -1.0
+
+        # 均一性の計算：標準偏差が小さいほど均一
+        mean_val = np.mean(internal_pixels)
+        std_val = np.std(internal_pixels)
+
+        # 変動係数（CV）を計算：std/mean
+        # CVが小さいほど均一
+        if mean_val > 0:
+            cv_value = std_val / mean_val
+        else:
+            cv_value = 1.0
+
+        # 均一性スコアに変換（0-1、高いほど均一）
+        # CV=0で均一性=1、CV>=1で均一性=0
+        uniformity = max(0.0, 1.0 - cv_value)
+
+        return uniformity
+
+    except Exception as e:
+        print(f"calculate_internal_uniformity error: {e}")
+        return -1.0
+
+
 def is_daytime(image, threshold):
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     mean_brightness = np.mean(gray)
@@ -359,14 +531,16 @@ def binarize(image, method='adaptive', relative_thresh=0.1, block_size=11, c_val
 
     return binary
 
-def analyze(binary, min_area=100, max_area=10000, select_center_only=True, select_largest=False, scale_factor=1.0, roi_offset_x=0, roi_offset_y=0, min_circularity=0.3):
+def analyze(binary, min_area=100, max_area=10000, select_center_only=True, select_largest=False, scale_factor=1.0, roi_offset_x=0, roi_offset_y=0, min_circularity=0.3, original_gray=None, min_uniformity=0.0):
     """
-    個体検出・解析関数（改良版）
+    個体検出・解析関数（改良版・内部均一性フィルタ対応）
 
     Args:
         select_largest: Trueの場合、最大面積かつ最も中心に近い個体を選択
         select_center_only: Trueの場合、中心に最も近い個体を選択（select_largestがFalseの時のみ）
         min_circularity: 最小真円度（0.0-1.0）、これ以下のオブジェクトは除外（ノイズフィルタ）
+        original_gray: 元のグレースケール画像（内部均一性計算用、Noneの場合はスキップ）
+        min_uniformity: 最小内部均一性（0.0-1.0）、これ以下のオブジェクトは除外
     """
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     results = []
@@ -410,6 +584,13 @@ def analyze(binary, min_area=100, max_area=10000, select_center_only=True, selec
         if circularity < min_circularity:
             continue
 
+        # 内部均一性フィルタ: プラナリアは内部が均一、ノイズは不均一
+        uniformity = 1.0  # デフォルト（フィルタなし）
+        if original_gray is not None and min_uniformity > 0:
+            uniformity = calculate_internal_uniformity(original_gray, cnt)
+            if uniformity >= 0 and uniformity < min_uniformity:
+                continue  # 均一性が低い（ノイズ）場合はスキップ
+
         # 実際の画像サイズに換算した値を保存（ROIオフセットを加算）
         actual_area = area / (scale_factor ** 2)
         actual_major_axis = ma / scale_factor if ma > 0 else 0
@@ -423,6 +604,7 @@ def analyze(binary, min_area=100, max_area=10000, select_center_only=True, selec
             'major_axis': actual_major_axis,
             'minor_axis': actual_minor_axis,
             'circularity': circularity,
+            'uniformity': uniformity if uniformity >= 0 else 1.0,  # 内部均一性
             'area': actual_area,
             'distance_from_center': distance_from_center,
             'contour': cnt
@@ -481,51 +663,70 @@ class AnimalDetectorGUI:
         self.folder_path = tk.StringVar()
         self.day_img_path = tk.StringVar()
         self.night_img_path = tk.StringVar()
-        self.min_area = tk.StringVar(value='100')
-        self.max_area = tk.StringVar(value='10000')
+        self.min_area = tk.StringVar(value=str(DEFAULT_MIN_AREA))
+        self.max_area = tk.StringVar(value=str(DEFAULT_MAX_AREA))
 
         # 新しい統一的な二値化パラメータ（暗い動物検出に最適化）
         self.binarize_method = tk.StringVar(value='adaptive')  # 'adaptive', 'relative', 'fixed'
-        self.relative_thresh = tk.DoubleVar(value=0.15)  # 相対閾値を上げて明るい部分を除外
-        self.block_size = tk.IntVar(value=15)  # 適応的二値化のブロックサイズ
-        self.c_value = tk.IntVar(value=8)  # 定数Cを上げて明るい部分を除外
-        self.use_bg_removal = tk.BooleanVar(value=False)  # バックグラウンド除去の使用
-        self.bg_kernel_size = tk.IntVar(value=31)  # バックグラウンド除去のカーネルサイズ
+        self.relative_thresh = tk.DoubleVar(value=DEFAULT_RELATIVE_THRESH)
+        self.block_size = tk.IntVar(value=DEFAULT_BLOCK_SIZE)
+        self.c_value = tk.IntVar(value=DEFAULT_C_VALUE)
+        self.use_bg_removal = tk.BooleanVar(value=False)
+        self.bg_kernel_size = tk.IntVar(value=DEFAULT_BG_KERNEL_SIZE)
+
+        # 自動背景補正設定（新機能）
+        self.use_auto_bg_correction = tk.BooleanVar(value=False)
+        self.auto_bg_method = tk.StringVar(value='adaptive')  # 'adaptive', 'rolling_ball', 'morphological'
 
         # Temporal Median Filter設定
-        self.use_temporal_median = tk.BooleanVar(value=False)  # Temporal median filterの使用
-        self.temporal_frames = tk.IntVar(value=100)  # 背景作成に使用するフレーム数
-        self.temporal_background = None  # 作成された背景画像を保存
+        self.use_temporal_median = tk.BooleanVar(value=False)
+        self.temporal_frames = tk.IntVar(value=DEFAULT_TEMPORAL_FRAMES)
+        self.temporal_background = None
 
         # 動画保存設定
-        self.save_video = tk.BooleanVar(value=False)  # 動画保存の使用
-        self.video_fps = tk.IntVar(value=10)  # 動画のFPS
-        self.video_scale = tk.DoubleVar(value=0.5)  # 動画のスケール（低画質化）
+        self.save_video = tk.BooleanVar(value=False)
+        self.video_fps = tk.IntVar(value=DEFAULT_VIDEO_FPS)
+        self.video_scale = tk.DoubleVar(value=DEFAULT_VIDEO_SCALE)
 
         # 時間設定
         self.day_start_time = tk.StringVar(value='07:00')
         self.night_start_time = tk.StringVar(value='19:00')
 
         # 測定開始時刻設定
-        self.measurement_start_time = tk.StringVar(value='09:00:00')  # デフォルト9時開始
+        self.measurement_start_time = tk.StringVar(value='09:00:00')
+
+        # フレーム間隔設定（秒）- 設定可能に
+        self.frame_interval = tk.IntVar(value=FRAME_INTERVAL_SECONDS)
 
         # 測定開始日付設定
-        self.measurement_date = tk.StringVar(value='2025-01-01')  # デフォルト日付（YYYY-MM-DD形式）
+        self.measurement_date = tk.StringVar(value='2025-01-01')
 
         # ROI関連
-        self.roi_coordinates = None  # (center_x, center_y, radius) in original image coordinates
+        self.roi_coordinates = None
         self.roi_active = tk.BooleanVar(value=False)
         self.drawing_roi = False
         self.roi_start_x = 0
         self.roi_start_y = 0
 
+        # ターゲット選択機能（インタラクティブ学習用）
+        self.target_selecting = False
+        self.target_info = None  # 選択されたターゲットの情報を保存
+        self.learned_brightness = None  # 学習した輝度値
+        self.learned_area_range = None  # 学習した面積範囲
+        self.target_canvas = None  # ターゲット選択用のキャンバス
+        self.target_image_path = None  # ターゲット選択用の画像パス
+
         # 個体選択方法設定を追加
-        self.select_largest = tk.BooleanVar(value=True)  # 最大面積の個体を選択
-        self.constant_darkness = tk.BooleanVar(value=False)  # Constant darkness条件
+        self.select_largest = tk.BooleanVar(value=True)
+        self.constant_darkness = tk.BooleanVar(value=False)
+
+        # 内部均一性フィルタ設定（プラナリアとノイズの区別用）
+        self.use_uniformity_filter = tk.BooleanVar(value=False)
+        self.min_uniformity = tk.DoubleVar(value=DEFAULT_MIN_UNIFORMITY)
 
         # コントラスト調整設定を追加
-        self.use_contrast_enhancement = tk.BooleanVar(value=False)  # コントラスト強化の使用
-        self.contrast_alpha = tk.DoubleVar(value=1.5)  # コントラスト倍率（1.0=変化なし、>1.0で強化）
+        self.use_contrast_enhancement = tk.BooleanVar(value=False)
+        self.contrast_alpha = tk.DoubleVar(value=DEFAULT_CONTRAST_ALPHA)
         self.brightness_beta = tk.IntVar(value=0)  # 明度調整（-100～100程度）
         self.use_clahe = tk.BooleanVar(value=False)  # CLAHE（局所適応ヒストグラム平坦化）の使用
         self.clahe_clip_limit = tk.DoubleVar(value=3.0)  # CLAHEのクリップ制限
@@ -572,131 +773,168 @@ class AnimalDetectorGUI:
 
         selection_row = tk.Frame(selection_frame)
         selection_row.pack(pady=1)
-        tk.Checkbutton(selection_row, text='Largest', variable=self.select_largest, font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
+        tk.Checkbutton(selection_row, text='Largest', variable=self.select_largest, font=('Arial', FONT_SIZE_SMALL)).pack(side=tk.LEFT, padx=1)
         tk.Checkbutton(selection_row, text='Const.Dark', variable=self.constant_darkness,
-                      command=self.toggle_constant_darkness, font=('Arial', 7)).pack(side=tk.LEFT, padx=(5,1))
+                      command=self.toggle_constant_darkness, font=('Arial', FONT_SIZE_SMALL)).pack(side=tk.LEFT, padx=(5,1))
+
+        # 内部均一性フィルタ（プラナリアとノイズの区別用）
+        selection_row2 = tk.Frame(selection_frame)
+        selection_row2.pack(pady=1)
+        tk.Checkbutton(selection_row2, text='均一性', variable=self.use_uniformity_filter,
+                      command=self.update_preview, font=('Arial', FONT_SIZE_SMALL)).pack(side=tk.LEFT, padx=1)
+        tk.Entry(selection_row2, textvariable=self.min_uniformity, width=4, font=('Arial', FONT_SIZE_SMALL)).pack(side=tk.LEFT, padx=1)
+        tk.Label(selection_row2, text='(0-1)', font=('Arial', FONT_SIZE_SMALL)).pack(side=tk.LEFT, padx=1)
 
         # パラメータ設定
-        param_frame = tk.LabelFrame(left_frame, text='面積範囲', font=('Arial', 7, 'bold'))
+        param_frame = tk.LabelFrame(left_frame, text='面積範囲', font=('Arial', FONT_SIZE_SMALL, 'bold'))
         param_frame.grid(row=3, column=0, columnspan=2, pady=2, padx=5, sticky='ew')
 
         size_frame = tk.Frame(param_frame)
         size_frame.pack(pady=1)
-        tk.Label(size_frame, text='最小:', font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
-        tk.Entry(size_frame, textvariable=self.min_area, width=6, font=('Arial', 7)).pack(side=tk.LEFT)
-        tk.Label(size_frame, text='最大:', font=('Arial', 7)).pack(side=tk.LEFT, padx=(5,1))
-        tk.Entry(size_frame, textvariable=self.max_area, width=6, font=('Arial', 7)).pack(side=tk.LEFT)
+        tk.Label(size_frame, text='最小:', font=('Arial', FONT_SIZE_SMALL)).pack(side=tk.LEFT, padx=1)
+        tk.Entry(size_frame, textvariable=self.min_area, width=6, font=('Arial', FONT_SIZE_SMALL)).pack(side=tk.LEFT)
+        tk.Label(size_frame, text='最大:', font=('Arial', FONT_SIZE_SMALL)).pack(side=tk.LEFT, padx=(5,1))
+        tk.Entry(size_frame, textvariable=self.max_area, width=6, font=('Arial', FONT_SIZE_SMALL)).pack(side=tk.LEFT)
         tk.Button(size_frame, text='更新', command=self.update_preview,
-                 bg='lightblue', font=('Arial', 7), width=6).pack(side=tk.LEFT, padx=(5,0))
+                 bg='lightblue', font=('Arial', FONT_SIZE_SMALL), width=6).pack(side=tk.LEFT, padx=(5,0))
 
         # 時間設定
-        time_frame = tk.LabelFrame(left_frame, text='時間', font=('Arial', 7, 'bold'))
+        time_frame = tk.LabelFrame(left_frame, text='時間', font=('Arial', FONT_SIZE_SMALL, 'bold'))
         time_frame.grid(row=4, column=0, columnspan=2, pady=2, padx=5, sticky='ew')
 
         time_entry_frame = tk.Frame(time_frame)
         time_entry_frame.pack(pady=1)
-        tk.Label(time_entry_frame, text='昼:', font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
-        tk.Entry(time_entry_frame, textvariable=self.day_start_time, width=5, font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
-        tk.Label(time_entry_frame, text='夜:', font=('Arial', 7)).pack(side=tk.LEFT, padx=(3,1))
-        tk.Entry(time_entry_frame, textvariable=self.night_start_time, width=5, font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
-        tk.Label(time_entry_frame, text='測定:', font=('Arial', 7)).pack(side=tk.LEFT, padx=(3,1))
-        tk.Entry(time_entry_frame, textvariable=self.measurement_start_time, width=7, font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
+        tk.Label(time_entry_frame, text='昼:', font=('Arial', FONT_SIZE_SMALL)).pack(side=tk.LEFT, padx=1)
+        tk.Entry(time_entry_frame, textvariable=self.day_start_time, width=5, font=('Arial', FONT_SIZE_SMALL)).pack(side=tk.LEFT, padx=1)
+        tk.Label(time_entry_frame, text='夜:', font=('Arial', FONT_SIZE_SMALL)).pack(side=tk.LEFT, padx=(3,1))
+        tk.Entry(time_entry_frame, textvariable=self.night_start_time, width=5, font=('Arial', FONT_SIZE_SMALL)).pack(side=tk.LEFT, padx=1)
+
+        time_entry_frame2 = tk.Frame(time_frame)
+        time_entry_frame2.pack(pady=1)
+        tk.Label(time_entry_frame2, text='測定開始:', font=('Arial', FONT_SIZE_SMALL)).pack(side=tk.LEFT, padx=1)
+        tk.Entry(time_entry_frame2, textvariable=self.measurement_start_time, width=7, font=('Arial', FONT_SIZE_SMALL)).pack(side=tk.LEFT, padx=1)
+        tk.Label(time_entry_frame2, text='間隔(秒):', font=('Arial', FONT_SIZE_SMALL)).pack(side=tk.LEFT, padx=(3,1))
+        tk.Entry(time_entry_frame2, textvariable=self.frame_interval, width=4, font=('Arial', FONT_SIZE_SMALL)).pack(side=tk.LEFT, padx=1)
 
         # Temporal Median Filter設定
-        temporal_frame = tk.LabelFrame(left_frame, text='背景除去', font=('Arial', 7, 'bold'))
+        temporal_frame = tk.LabelFrame(left_frame, text='背景除去', font=('Arial', FONT_SIZE_SMALL, 'bold'))
         temporal_frame.grid(row=5, column=0, columnspan=2, pady=2, padx=5, sticky='ew')
 
         temporal_row = tk.Frame(temporal_frame)
         temporal_row.pack(pady=1)
-        tk.Checkbutton(temporal_row, text='使用', variable=self.use_temporal_median, font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
-        tk.Label(temporal_row, text='F:', font=('Arial', 7)).pack(side=tk.LEFT, padx=(3,1))
-        tk.Entry(temporal_row, textvariable=self.temporal_frames, width=4, font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
+        tk.Checkbutton(temporal_row, text='Temporal', variable=self.use_temporal_median, font=('Arial', FONT_SIZE_SMALL)).pack(side=tk.LEFT, padx=1)
+        tk.Label(temporal_row, text='F:', font=('Arial', FONT_SIZE_SMALL)).pack(side=tk.LEFT, padx=(3,1))
+        tk.Entry(temporal_row, textvariable=self.temporal_frames, width=4, font=('Arial', FONT_SIZE_SMALL)).pack(side=tk.LEFT, padx=1)
         tk.Button(temporal_row, text='作成', command=self.create_background,
-                 bg='lightyellow', font=('Arial', 7), width=5).pack(side=tk.LEFT, padx=(3,0))
-        self.temporal_status_label = tk.Label(temporal_row, text='未作成', font=('Arial', 6))
+                 bg='lightyellow', font=('Arial', FONT_SIZE_SMALL), width=5).pack(side=tk.LEFT, padx=(3,0))
+        self.temporal_status_label = tk.Label(temporal_row, text='未作成', font=('Arial', FONT_SIZE_SMALL))
         self.temporal_status_label.pack(side=tk.LEFT, padx=(3,0))
 
+        # 自動背景補正設定（新機能）
+        auto_bg_row = tk.Frame(temporal_frame)
+        auto_bg_row.pack(pady=1)
+        tk.Checkbutton(auto_bg_row, text='自動補正', variable=self.use_auto_bg_correction,
+                      command=self.update_preview, font=('Arial', FONT_SIZE_SMALL)).pack(side=tk.LEFT, padx=1)
+        ttk.Combobox(auto_bg_row, textvariable=self.auto_bg_method,
+                    values=['adaptive', 'rolling_ball', 'morphological'],
+                    state='readonly', width=10, font=('Arial', FONT_SIZE_SMALL)).pack(side=tk.LEFT, padx=1)
+
         # 動画保存設定
-        video_frame = tk.LabelFrame(left_frame, text='動画', font=('Arial', 7, 'bold'))
+        video_frame = tk.LabelFrame(left_frame, text='動画', font=('Arial', FONT_SIZE_SMALL, 'bold'))
         video_frame.grid(row=6, column=0, columnspan=2, pady=2, padx=5, sticky='ew')
 
         video_row = tk.Frame(video_frame)
         video_row.pack(pady=1)
-        tk.Checkbutton(video_row, text='保存', variable=self.save_video, font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
-        tk.Label(video_row, text='FPS:', font=('Arial', 7)).pack(side=tk.LEFT, padx=(3,1))
-        tk.Entry(video_row, textvariable=self.video_fps, width=3, font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
-        tk.Label(video_row, text='Scale:', font=('Arial', 7)).pack(side=tk.LEFT, padx=(3,1))
-        tk.Entry(video_row, textvariable=self.video_scale, width=4, font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
+        tk.Checkbutton(video_row, text='保存', variable=self.save_video, font=('Arial', FONT_SIZE_SMALL)).pack(side=tk.LEFT, padx=1)
+        tk.Label(video_row, text='FPS:', font=('Arial', FONT_SIZE_SMALL)).pack(side=tk.LEFT, padx=(3,1))
+        tk.Entry(video_row, textvariable=self.video_fps, width=3, font=('Arial', FONT_SIZE_SMALL)).pack(side=tk.LEFT, padx=1)
+        tk.Label(video_row, text='Scale:', font=('Arial', FONT_SIZE_SMALL)).pack(side=tk.LEFT, padx=(3,1))
+        tk.Entry(video_row, textvariable=self.video_scale, width=4, font=('Arial', FONT_SIZE_SMALL)).pack(side=tk.LEFT, padx=1)
 
         # 二値化設定
-        binarize_frame = tk.LabelFrame(left_frame, text='二値化', font=('Arial', 7, 'bold'))
+        binarize_frame = tk.LabelFrame(left_frame, text='二値化', font=('Arial', FONT_SIZE_SMALL, 'bold'))
         binarize_frame.grid(row=7, column=0, columnspan=2, pady=2, padx=5, sticky='ew')
 
         # 2行に分けてコンパクトに
-        tk.Label(binarize_frame, text='方式:', font=('Arial', 6)).grid(row=0, column=0, padx=1, pady=1, sticky='w')
-        ttk.Combobox(binarize_frame, textvariable=self.binarize_method, values=['adaptive', 'relative', 'fixed'], state='readonly', width=7, font=('Arial', 7)).grid(row=0, column=1, padx=1, pady=1)
-        tk.Label(binarize_frame, text='C:', font=('Arial', 6)).grid(row=0, column=2, padx=(3,1), pady=1, sticky='w')
-        tk.Entry(binarize_frame, textvariable=self.c_value, width=4, font=('Arial', 7)).grid(row=0, column=3, padx=1, pady=1)
-        tk.Label(binarize_frame, text='BG:', font=('Arial', 6)).grid(row=0, column=4, padx=(3,1), pady=1, sticky='w')
-        ttk.Combobox(binarize_frame, textvariable=self.use_bg_removal, values=[True, False], state='readonly', width=5, font=('Arial', 7)).grid(row=0, column=5, padx=1, pady=1)
+        tk.Label(binarize_frame, text='方式:', font=('Arial', FONT_SIZE_SMALL)).grid(row=0, column=0, padx=1, pady=1, sticky='w')
+        ttk.Combobox(binarize_frame, textvariable=self.binarize_method, values=['adaptive', 'relative', 'fixed'], state='readonly', width=7, font=('Arial', FONT_SIZE_SMALL)).grid(row=0, column=1, padx=1, pady=1)
+        tk.Label(binarize_frame, text='C:', font=('Arial', FONT_SIZE_SMALL)).grid(row=0, column=2, padx=(3,1), pady=1, sticky='w')
+        tk.Entry(binarize_frame, textvariable=self.c_value, width=4, font=('Arial', FONT_SIZE_SMALL)).grid(row=0, column=3, padx=1, pady=1)
+        tk.Label(binarize_frame, text='BG:', font=('Arial', FONT_SIZE_SMALL)).grid(row=0, column=4, padx=(3,1), pady=1, sticky='w')
+        ttk.Combobox(binarize_frame, textvariable=self.use_bg_removal, values=[True, False], state='readonly', width=5, font=('Arial', FONT_SIZE_SMALL)).grid(row=0, column=5, padx=1, pady=1)
 
-        tk.Label(binarize_frame, text='閾値:', font=('Arial', 6)).grid(row=1, column=0, padx=1, pady=1, sticky='w')
-        tk.Entry(binarize_frame, textvariable=self.relative_thresh, width=5, font=('Arial', 7)).grid(row=1, column=1, padx=1, pady=1)
-        tk.Label(binarize_frame, text='Block:', font=('Arial', 6)).grid(row=1, column=2, padx=(3,1), pady=1, sticky='w')
-        tk.Entry(binarize_frame, textvariable=self.block_size, width=4, font=('Arial', 7)).grid(row=1, column=3, padx=1, pady=1)
-        tk.Label(binarize_frame, text='Kernel:', font=('Arial', 6)).grid(row=1, column=4, padx=(3,1), pady=1, sticky='w')
-        tk.Entry(binarize_frame, textvariable=self.bg_kernel_size, width=4, font=('Arial', 7)).grid(row=1, column=5, padx=1, pady=1)
+        tk.Label(binarize_frame, text='閾値:', font=('Arial', FONT_SIZE_SMALL)).grid(row=1, column=0, padx=1, pady=1, sticky='w')
+        tk.Entry(binarize_frame, textvariable=self.relative_thresh, width=5, font=('Arial', FONT_SIZE_SMALL)).grid(row=1, column=1, padx=1, pady=1)
+        tk.Label(binarize_frame, text='Block:', font=('Arial', FONT_SIZE_SMALL)).grid(row=1, column=2, padx=(3,1), pady=1, sticky='w')
+        tk.Entry(binarize_frame, textvariable=self.block_size, width=4, font=('Arial', FONT_SIZE_SMALL)).grid(row=1, column=3, padx=1, pady=1)
+        tk.Label(binarize_frame, text='Kernel:', font=('Arial', FONT_SIZE_SMALL)).grid(row=1, column=4, padx=(3,1), pady=1, sticky='w')
+        tk.Entry(binarize_frame, textvariable=self.bg_kernel_size, width=4, font=('Arial', FONT_SIZE_SMALL)).grid(row=1, column=5, padx=1, pady=1)
 
         # ROI設定
-        roi_frame = tk.LabelFrame(left_frame, text='ROI', font=('Arial', 7, 'bold'))
+        roi_frame = tk.LabelFrame(left_frame, text='ROI', font=('Arial', FONT_SIZE_SMALL, 'bold'))
         roi_frame.grid(row=8, column=0, columnspan=2, pady=2, padx=5, sticky='ew')
 
         roi_control_frame = tk.Frame(roi_frame)
         roi_control_frame.pack(pady=1)
         tk.Checkbutton(roi_control_frame, text='使用', variable=self.roi_active,
-                      command=self.toggle_roi, font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
+                      command=self.toggle_roi, font=('Arial', FONT_SIZE_SMALL)).pack(side=tk.LEFT, padx=1)
         tk.Button(roi_control_frame, text='設定', command=self.set_roi_mode,
-                 bg='orange', font=('Arial', 7), width=5).pack(side=tk.LEFT, padx=2)
+                 bg='orange', font=('Arial', FONT_SIZE_SMALL), width=5).pack(side=tk.LEFT, padx=2)
         tk.Button(roi_control_frame, text='クリア', command=self.clear_roi,
-                 bg='lightgray', font=('Arial', 7), width=5).pack(side=tk.LEFT, padx=1)
-        self.roi_info_label = tk.Label(roi_control_frame, text='未設定', font=('Arial', 6))
+                 bg='lightgray', font=('Arial', FONT_SIZE_SMALL), width=5).pack(side=tk.LEFT, padx=1)
+        self.roi_info_label = tk.Label(roi_control_frame, text='未設定', font=('Arial', FONT_SIZE_SMALL))
         self.roi_info_label.pack(side=tk.LEFT, padx=(3,0))
 
+        # ターゲット選択機能（インタラクティブ学習）
+        target_frame = tk.LabelFrame(left_frame, text='ターゲット選択', font=('Arial', FONT_SIZE_SMALL, 'bold'))
+        target_frame.grid(row=9, column=0, columnspan=2, pady=2, padx=5, sticky='ew')
+
+        target_control_frame = tk.Frame(target_frame)
+        target_control_frame.pack(pady=1)
+        tk.Button(target_control_frame, text='選択', command=self.start_target_selection,
+                 bg='#90EE90', font=('Arial', FONT_SIZE_SMALL), width=5).pack(side=tk.LEFT, padx=1)
+        tk.Button(target_control_frame, text='適用', command=self.apply_learned_params,
+                 bg='#87CEEB', font=('Arial', FONT_SIZE_SMALL), width=5).pack(side=tk.LEFT, padx=1)
+        tk.Button(target_control_frame, text='クリア', command=self.clear_target,
+                 bg='lightgray', font=('Arial', FONT_SIZE_SMALL), width=5).pack(side=tk.LEFT, padx=1)
+        self.target_info_label = tk.Label(target_control_frame, text='未選択', font=('Arial', FONT_SIZE_SMALL))
+        self.target_info_label.pack(side=tk.LEFT, padx=(3,0))
+
         # コントラスト調整設定
-        contrast_frame = tk.LabelFrame(left_frame, text='画像強調', font=('Arial', 7, 'bold'))
-        contrast_frame.grid(row=9, column=0, columnspan=2, pady=2, padx=5, sticky='ew')
+        contrast_frame = tk.LabelFrame(left_frame, text='画像強調', font=('Arial', FONT_SIZE_SMALL, 'bold'))
+        contrast_frame.grid(row=10, column=0, columnspan=2, pady=2, padx=5, sticky='ew')
 
         # 1行目
         contrast_row1 = tk.Frame(contrast_frame)
         contrast_row1.pack(pady=1)
         tk.Checkbutton(contrast_row1, text='Cont', variable=self.use_contrast_enhancement,
-                      command=self.update_preview, font=('Arial', 6)).pack(side=tk.LEFT, padx=1)
-        tk.Entry(contrast_row1, textvariable=self.contrast_alpha, width=3, font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
+                      command=self.update_preview, font=('Arial', FONT_SIZE_SMALL)).pack(side=tk.LEFT, padx=1)
+        tk.Entry(contrast_row1, textvariable=self.contrast_alpha, width=3, font=('Arial', FONT_SIZE_SMALL)).pack(side=tk.LEFT, padx=1)
         tk.Checkbutton(contrast_row1, text='CLAHE', variable=self.use_clahe,
-                      command=self.update_preview, font=('Arial', 6)).pack(side=tk.LEFT, padx=(3,1))
-        tk.Entry(contrast_row1, textvariable=self.clahe_clip_limit, width=3, font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
+                      command=self.update_preview, font=('Arial', FONT_SIZE_SMALL)).pack(side=tk.LEFT, padx=(3,1))
+        tk.Entry(contrast_row1, textvariable=self.clahe_clip_limit, width=3, font=('Arial', FONT_SIZE_SMALL)).pack(side=tk.LEFT, padx=1)
         tk.Checkbutton(contrast_row1, text='Edge', variable=self.use_edge_enhancement,
-                      command=self.update_preview, font=('Arial', 6)).pack(side=tk.LEFT, padx=(3,1))
-        tk.Entry(contrast_row1, textvariable=self.edge_weight, width=3, font=('Arial', 7)).pack(side=tk.LEFT, padx=1)
+                      command=self.update_preview, font=('Arial', FONT_SIZE_SMALL)).pack(side=tk.LEFT, padx=(3,1))
+        tk.Entry(contrast_row1, textvariable=self.edge_weight, width=3, font=('Arial', FONT_SIZE_SMALL)).pack(side=tk.LEFT, padx=1)
 
         # メインボタン
         button_frame = tk.Frame(left_frame)
-        button_frame.grid(row=10, column=0, columnspan=2, pady=2)
+        button_frame.grid(row=11, column=0, columnspan=2, pady=2)
 
         # 設定保存・ロードボタン
         config_frame = tk.Frame(button_frame)
         config_frame.pack(pady=1)
         tk.Button(config_frame, text='保存', command=self.save_config,
-                 bg='lightblue', font=('Arial', 7), width=7).pack(side=tk.LEFT, padx=1)
+                 bg='lightblue', font=('Arial', FONT_SIZE_SMALL), width=7).pack(side=tk.LEFT, padx=1)
         tk.Button(config_frame, text='ロード', command=self.load_config,
-                 bg='lightyellow', font=('Arial', 7), width=7).pack(side=tk.LEFT, padx=1)
+                 bg='lightyellow', font=('Arial', FONT_SIZE_SMALL), width=7).pack(side=tk.LEFT, padx=1)
         tk.Button(config_frame, text='更新', command=self.update_preview,
-                 bg='lightcyan', font=('Arial', 7), width=7).pack(side=tk.LEFT, padx=1)
+                 bg='lightcyan', font=('Arial', FONT_SIZE_SMALL), width=7).pack(side=tk.LEFT, padx=1)
 
         tk.Button(button_frame, text='解析開始', command=self.start_analysis,
-                 bg='lightgreen', font=('Arial', 9, 'bold'), width=22).pack(pady=2)
+                 bg='lightgreen', font=('Arial', FONT_SIZE_NORMAL, 'bold'), width=22).pack(pady=2)
         tk.Button(button_frame, text='終了', command=self.root.quit,
-                 bg='lightcoral', font=('Arial', 8), width=22).pack(pady=1)
+                 bg='lightcoral', font=('Arial', FONT_SIZE_SMALL), width=22).pack(pady=1)
 
         # 右側：プレビューパネル
         right_frame = tk.Frame(main_frame)
@@ -792,138 +1030,154 @@ class AnimalDetectorGUI:
                 self.show_preview(night_img, min_area, max_area, self.night_canvas, "夜")
 
     def show_preview(self, image, min_area, max_area, canvas, time_type):
-        # 元画像のサイズを取得
-        original_h, original_w = image.shape[:2]
+        try:
+            # 元画像のサイズを取得
+            original_h, original_w = image.shape[:2]
 
-        # ROIが有効な場合は対象領域を切り出し
-        roi_img = image
-        roi_offset_x, roi_offset_y = 0, 0
-        if self.roi_active.get() and self.roi_coordinates:
-            # 円形ROI座標（center_x, center_y, radius）を矩形座標に変換
-            center_x, center_y, radius = self.roi_coordinates
-            x1 = max(0, center_x - radius)
-            y1 = max(0, center_y - radius)
-            x2 = min(image.shape[1], center_x + radius)
-            y2 = min(image.shape[0], center_y + radius)
-            roi_img = image[y1:y2, x1:x2]
-            roi_offset_x, roi_offset_y = x1, y1
+            # ROIが有効な場合は対象領域を切り出し
+            roi_img = image
+            roi_offset_x, roi_offset_y = 0, 0
+            if self.roi_active.get() and self.roi_coordinates:
+                # 円形ROI座標（center_x, center_y, radius）を矩形座標に変換
+                center_x, center_y, radius = self.roi_coordinates
+                x1 = max(0, center_x - radius)
+                y1 = max(0, center_y - radius)
+                x2 = min(image.shape[1], center_x + radius)
+                y2 = min(image.shape[0], center_y + radius)
+                if x2 > x1 and y2 > y1:  # 有効なROIかチェック
+                    roi_img = image[y1:y2, x1:x2]
+                    roi_offset_x, roi_offset_y = x1, y1
 
-        # コントラスト調整を適用
-        if self.use_contrast_enhancement.get() or self.use_clahe.get():
-            try:
-                alpha = self.contrast_alpha.get()
-                beta = self.brightness_beta.get()
-                clip_limit = self.clahe_clip_limit.get()
-                roi_img = enhance_contrast(roi_img, 
-                                         use_contrast=self.use_contrast_enhancement.get(),
-                                         alpha=alpha, beta=beta,
-                                         use_clahe=self.use_clahe.get(),
-                                         clip_limit=clip_limit)
-            except ValueError:
-                # パラメータエラーの場合はコントラスト調整をスキップ
-                pass
+            # 自動背景補正を適用（新機能）
+            if self.use_auto_bg_correction.get():
+                corrected = auto_background_correction(roi_img, method=self.auto_bg_method.get())
+                # Noneチェック
+                if corrected is not None:
+                    roi_img = cv2.cvtColor(corrected, cv2.COLOR_GRAY2BGR)
 
-        # 画像を適切なサイズにリサイズ
-        resized_img = self.resize_image_for_canvas(roi_img)
-        resized_h, resized_w = resized_img.shape[:2]
+            # コントラスト調整を適用
+            if self.use_contrast_enhancement.get() or self.use_clahe.get():
+                try:
+                    alpha = self.contrast_alpha.get()
+                    beta = self.brightness_beta.get()
+                    clip_limit = self.clahe_clip_limit.get()
+                    roi_img = enhance_contrast(roi_img,
+                                             use_contrast=self.use_contrast_enhancement.get(),
+                                             alpha=alpha, beta=beta,
+                                             use_clahe=self.use_clahe.get(),
+                                             clip_limit=clip_limit)
+                except ValueError:
+                    # パラメータエラーの場合はコントラスト調整をスキップ
+                    pass
 
-        # スケール比を計算
-        scale_factor = min(resized_w / roi_img.shape[1], resized_h / roi_img.shape[0])
+            # 画像を適切なサイズにリサイズ
+            resized_img = self.resize_image_for_canvas(roi_img)
+            resized_h, resized_w = resized_img.shape[:2]
 
-        # キャンバスにスケール情報を保存（ROI設定で使用）
-        canvas.scale_factor = scale_factor
-        canvas_width = canvas.winfo_width() if canvas.winfo_width() > 1 else 300
-        canvas_height = canvas.winfo_height() if canvas.winfo_height() > 1 else 200
-        canvas.image_offset_x = (canvas_width - resized_w) // 2
-        canvas.image_offset_y = (canvas_height - resized_h) // 2
+            # スケール比を計算
+            scale_factor = min(resized_w / roi_img.shape[1], resized_h / roi_img.shape[0])
 
-        # 二値化（ROI座標を渡して完全なマスクを適用）
-        roi_coords_for_binarize = None
-        if self.roi_active.get() and self.roi_coordinates:
-            # プレビュー用の座標をリサイズ後の座標に変換
-            center_x, center_y, radius = self.roi_coordinates
-            # ROI座標をリサイズ後の画像座標に変換
-            roi_center_x = (center_x - roi_offset_x) * scale_factor
-            roi_center_y = (center_y - roi_offset_y) * scale_factor
-            roi_radius = radius * scale_factor
-            roi_coords_for_binarize = (roi_center_x, roi_center_y, roi_radius)
+            # キャンバスにスケール情報を保存（ROI設定で使用）
+            canvas.scale_factor = scale_factor
+            canvas_width = canvas.winfo_width() if canvas.winfo_width() > 1 else CANVAS_PREVIEW_WIDTH
+            canvas_height = canvas.winfo_height() if canvas.winfo_height() > 1 else CANVAS_PREVIEW_HEIGHT
+            canvas.image_offset_x = (canvas_width - resized_w) // 2
+            canvas.image_offset_y = (canvas_height - resized_h) // 2
 
-        binary = binarize(resized_img,
-                         method=self.binarize_method.get(),
-                         relative_thresh=self.relative_thresh.get(),
-                         block_size=self.block_size.get(),
-                         c_value=self.c_value.get(),
-                         use_bg_removal=self.use_bg_removal.get(),
-                         bg_kernel_size=self.bg_kernel_size.get(),
-                         roi_coordinates=roi_coords_for_binarize,
-                         use_edge_enhancement=self.use_edge_enhancement.get(),
-                         edge_weight=self.edge_weight.get())
+            # 二値化（ROI座標を渡して完全なマスクを適用）
+            roi_coords_for_binarize = None
+            if self.roi_active.get() and self.roi_coordinates:
+                # プレビュー用の座標をリサイズ後の座標に変換
+                center_x, center_y, radius = self.roi_coordinates
+                # ROI座標をリサイズ後の画像座標に変換
+                roi_center_x = (center_x - roi_offset_x) * scale_factor
+                roi_center_y = (center_y - roi_offset_y) * scale_factor
+                roi_radius = radius * scale_factor
+                roi_coords_for_binarize = (roi_center_x, roi_center_y, roi_radius)
 
-        # 検出（スケール比を考慮）
-        results, contours = analyze(
-            binary,
-            min_area=min_area,
-            max_area=max_area,
-            select_center_only=(not self.select_largest.get()),
-            select_largest=self.select_largest.get(),
-            scale_factor=scale_factor,
-            roi_offset_x=roi_offset_x,
-            roi_offset_y=roi_offset_y
-        )
+            binary = binarize(resized_img,
+                             method=self.binarize_method.get(),
+                             relative_thresh=self.relative_thresh.get(),
+                             block_size=self.block_size.get(),
+                             c_value=self.c_value.get(),
+                             use_bg_removal=self.use_bg_removal.get(),
+                             bg_kernel_size=self.bg_kernel_size.get(),
+                             roi_coordinates=roi_coords_for_binarize,
+                             use_edge_enhancement=self.use_edge_enhancement.get(),
+                             edge_weight=self.edge_weight.get())
 
-        # 検出結果を描画
-        preview_img = resized_img.copy()
-        cv2.drawContours(preview_img, contours, -1, (0, 255, 0), 2)
-        for result in results:
-            # ROI座標を考慮してプレビュー座標に変換
-            roi_rel_x = result['centroid_x'] - roi_offset_x
-            roi_rel_y = result['centroid_y'] - roi_offset_y
-            cv2.circle(preview_img, (int(roi_rel_x * scale_factor), int(roi_rel_y * scale_factor)), 3, (0, 0, 255), -1)
+            # 内部均一性フィルタ用のグレースケール画像を準備
+            original_gray_for_uniformity = None
+            min_uniformity_val = 0.0
+            if self.use_uniformity_filter.get():
+                original_gray_for_uniformity = cv2.cvtColor(resized_img, cv2.COLOR_BGR2GRAY)
+                min_uniformity_val = self.min_uniformity.get()
 
-        # ROI矩形を描画（ROI有効時）
-        if self.roi_active.get() and self.roi_coordinates:
-            # ROI全体を表示する場合の元画像プレビュー
-            full_resized = self.resize_image_for_canvas(image)
-            full_scale = min(300 / original_w, 200 / original_h)
+            # 検出（スケール比を考慮）
+            results, contours = analyze(
+                binary,
+                min_area=min_area,
+                max_area=max_area,
+                select_center_only=(not self.select_largest.get()),
+                select_largest=self.select_largest.get(),
+                scale_factor=scale_factor,
+                roi_offset_x=roi_offset_x,
+                roi_offset_y=roi_offset_y,
+                original_gray=original_gray_for_uniformity,
+                min_uniformity=min_uniformity_val
+            )
 
-            # 円形ROI座標（center_x, center_y, radius）を矩形座標に変換
-            center_x, center_y, radius = self.roi_coordinates
-            roi_x1 = int((center_x - radius) * full_scale)
-            roi_y1 = int((center_y - radius) * full_scale)
-            roi_x2 = int((center_x + radius) * full_scale)
-            roi_y2 = int((center_y + radius) * full_scale)
+            # 検出結果を描画
+            preview_img = resized_img.copy()
+            cv2.drawContours(preview_img, contours, -1, (0, 255, 0), 2)
+            for result in results:
+                # ROI座標を考慮してプレビュー座標に変換
+                roi_rel_x = result['centroid_x'] - roi_offset_x
+                roi_rel_y = result['centroid_y'] - roi_offset_y
+                cv2.circle(preview_img, (int(roi_rel_x * scale_factor), int(roi_rel_y * scale_factor)), 3, (0, 0, 255), -1)
 
-            # ROI領域のみ表示
-            preview_img_rgb = cv2.cvtColor(preview_img, cv2.COLOR_BGR2RGB)
-        else:
-            preview_img_rgb = cv2.cvtColor(preview_img, cv2.COLOR_BGR2RGB)
+            # ROI矩形を描画（ROI有効時）
+            if self.roi_active.get() and self.roi_coordinates:
+                # ROI全体を表示する場合の元画像プレビュー
+                full_resized = self.resize_image_for_canvas(image)
+                full_scale = min(300 / original_w, 200 / original_h)
 
-        # PIL Imageに変換してtkinterで表示
-        pil_img = Image.fromarray(preview_img_rgb)
-        photo = ImageTk.PhotoImage(pil_img)
+                # 円形ROI座標（center_x, center_y, radius）を矩形座標に変換
+                center_x, center_y, radius = self.roi_coordinates
+                roi_x1 = int((center_x - radius) * full_scale)
+                roi_y1 = int((center_y - radius) * full_scale)
+                roi_x2 = int((center_x + radius) * full_scale)
+                roi_y2 = int((center_y + radius) * full_scale)
 
-        # キャンバスに描画
-        canvas.delete("all")
+                # ROI領域のみ表示
+                preview_img_rgb = cv2.cvtColor(preview_img, cv2.COLOR_BGR2RGB)
+            else:
+                preview_img_rgb = cv2.cvtColor(preview_img, cv2.COLOR_BGR2RGB)
 
-        x = canvas.image_offset_x
-        y = canvas.image_offset_y
-        canvas.create_image(x, y, anchor=tk.NW, image=photo)
-        canvas.image = photo  # 参照を保持
+            # PIL Imageに変換してtkinterで表示
+            pil_img = Image.fromarray(preview_img_rgb)
+            photo = ImageTk.PhotoImage(pil_img)
 
-        # ROI矩形を表示（設定済みの場合）
-        if self.roi_active.get() and self.roi_coordinates and not self.roi_active.get():
-            # 元画像全体を表示している場合のROI矩形
-            pass
+            # キャンバスに描画
+            canvas.delete("all")
 
-        # 検出情報をキャンバスに表示
-        roi_status = " (ROI)" if self.roi_active.get() and self.roi_coordinates else ""
-        contrast_status = " +Contrast" if self.use_contrast_enhancement.get() or self.use_clahe.get() else ""
-        if results:
-            info_text = f"{time_type}{roi_status}{contrast_status}: {len(results)}個検出 (面積: {results[0]['area']:.0f})"
-        else:
-            info_text = f"{time_type}{roi_status}{contrast_status}: {len(results)}個検出"
-        canvas.create_text(10, 10, anchor=tk.NW, text=info_text,
-                          fill="blue", font=("Arial", 10, "bold"))
+            x = canvas.image_offset_x
+            y = canvas.image_offset_y
+            canvas.create_image(x, y, anchor=tk.NW, image=photo)
+            canvas.image = photo  # 参照を保持
+
+            # 検出情報をキャンバスに表示
+            roi_status = " (ROI)" if self.roi_active.get() and self.roi_coordinates else ""
+            contrast_status = " +Contrast" if self.use_contrast_enhancement.get() or self.use_clahe.get() else ""
+            if results:
+                info_text = f"{time_type}{roi_status}{contrast_status}: {len(results)}個検出 (面積: {results[0]['area']:.0f})"
+            else:
+                info_text = f"{time_type}{roi_status}{contrast_status}: {len(results)}個検出"
+            canvas.create_text(10, 10, anchor=tk.NW, text=info_text,
+                              fill="blue", font=("Arial", 10, "bold"))
+        except Exception as e:
+            # プレビュー更新中のエラーは静かに無視（クラッシュ防止）
+            print(f"Preview error ({time_type}): {e}")
 
     def log_output(self, text):
         self.output_text.insert(tk.END, text + '\n')
@@ -1069,6 +1323,12 @@ class AnimalDetectorGUI:
                 # 3チャンネルに変換して既存の処理と互換性を保つ
                 roi_img = cv2.cvtColor(processed_img, cv2.COLOR_GRAY2BGR)
 
+            # 自動背景補正を適用（新機能）
+            if self.use_auto_bg_correction.get():
+                corrected = auto_background_correction(roi_img, method=self.auto_bg_method.get())
+                if corrected is not None:
+                    roi_img = cv2.cvtColor(corrected, cv2.COLOR_GRAY2BGR)
+
             # コントラスト調整を適用（有効な場合）
             if self.use_contrast_enhancement.get() or self.use_clahe.get():
                 try:
@@ -1096,6 +1356,13 @@ class AnimalDetectorGUI:
                              use_edge_enhancement=self.use_edge_enhancement.get(),
                              edge_weight=self.edge_weight.get())
 
+            # 内部均一性フィルタ用のグレースケール画像を準備
+            original_gray_for_uniformity = None
+            min_uniformity_val = 0.0
+            if self.use_uniformity_filter.get():
+                original_gray_for_uniformity = cv2.cvtColor(roi_img, cv2.COLOR_BGR2GRAY)
+                min_uniformity_val = self.min_uniformity.get()
+
             # 解析
             results, contours = analyze(
                 binary,
@@ -1105,7 +1372,9 @@ class AnimalDetectorGUI:
                 select_largest=self.select_largest.get(),
                 scale_factor=1.0,
                 roi_offset_x=roi_offset_x,
-                roi_offset_y=roi_offset_y
+                roi_offset_y=roi_offset_y,
+                original_gray=original_gray_for_uniformity,
+                min_uniformity=min_uniformity_val
             )
 
             # 動画フレーム作成（動画保存が有効な場合）
@@ -1192,12 +1461,15 @@ class AnimalDetectorGUI:
             return
 
         try:
-            # --- タイムスタンプ生成ロジックの変更 ---
-            # timelog.txt を使わず、GUIの測定開始時刻と10秒間隔でタイムスタンプを生成する
+            # --- タイムスタンプ生成ロジック ---
+            # GUIの測定開始時刻とフレーム間隔でタイムスタンプを生成
             from datetime import datetime, timedelta, date
 
             measurement_start_str = self.measurement_start_time.get()
             start_time = datetime.strptime(measurement_start_str, '%H:%M:%S').time()
+
+            # フレーム間隔を取得（GUIで設定可能）
+            frame_interval = self.frame_interval.get()
 
             # 画像ファイルの日付を特定する（ここでは今日の日付を基準とする）
             today = date.today()
@@ -1220,7 +1492,7 @@ class AnimalDetectorGUI:
             current_datetime = start_datetime
             for _ in sorted_filenames:
                 timestamps.append(current_datetime)
-                current_datetime += timedelta(seconds=10)
+                current_datetime += timedelta(seconds=frame_interval)
 
             if len(sorted_filenames) != len(timestamps):
                  self.log_output(f"Warning: Mismatch between number of files ({len(sorted_filenames)}) and timestamps ({len(timestamps)}).")
@@ -1244,10 +1516,8 @@ class AnimalDetectorGUI:
             measurement_start_str = self.measurement_start_time.get()
             try:
                 measurement_start = datetime.strptime(measurement_start_str, '%H:%M:%S').time()
-                # 測定開始時間以降のデータのみを使用する場合のフィルタリング
-                # filtered_df = merged_df[merged_df['datetime'].dt.time >= measurement_start]
                 # 現在はフィルタリングせず、マーカーのみ表示
-                self.log_output(f'測定開始時間を設定しました: {measurement_start_str}')
+                self.log_output(f'測定開始時間: {measurement_start_str}, フレーム間隔: {frame_interval}秒')
             except ValueError:
                 measurement_start = None
                 self.log_output(f'測定開始時間の形式が無効です: {measurement_start_str}')
@@ -1346,7 +1616,310 @@ class AnimalDetectorGUI:
             self.log_output(f"Error creating graph: {e}")
             messagebox.showerror("Error", f"Error creating graph:\n{e}")
 
+    # =============================================================================
+    # ターゲット選択機能（インタラクティブ学習）
+    # プラナリアをクリックして、その特徴を学習し、検出パラメータを自動推定
+    # =============================================================================
+
+    def start_target_selection(self):
+        """ターゲット選択モードを開始（昼・夜両方対応）"""
+        # 昼か夜のどちらかの画像が必要
+        day_path = self.day_img_path.get()
+        night_path = self.night_img_path.get()
+
+        if not day_path and not night_path:
+            messagebox.showwarning('警告', '先に昼または夜の代表画像を選択してください')
+            return
+
+        # 現在表示中のタブを確認して、対象画像とキャンバスを決定
+        current_tab = self.notebook.index(self.notebook.select())
+
+        if current_tab == 0:  # 昼画像タブ
+            if not day_path or not os.path.exists(day_path):
+                messagebox.showwarning('警告', '昼の代表画像が見つかりません')
+                return
+            target_canvas = self.day_canvas
+            target_path = day_path
+            target_type = '昼'
+        elif current_tab == 1:  # 夜画像タブ
+            if not night_path or not os.path.exists(night_path):
+                messagebox.showwarning('警告', '夜の代表画像が見つかりません')
+                return
+            target_canvas = self.night_canvas
+            target_path = night_path
+            target_type = '夜'
+        else:
+            # 背景プレビュータブの場合は昼画像を使用
+            if day_path and os.path.exists(day_path):
+                target_canvas = self.day_canvas
+                target_path = day_path
+                target_type = '昼'
+            elif night_path and os.path.exists(night_path):
+                target_canvas = self.night_canvas
+                target_path = night_path
+                target_type = '夜'
+            else:
+                messagebox.showwarning('警告', '代表画像が見つかりません')
+                return
+
+        # プレビューを更新してスケール情報を確実に設定
+        self.update_preview()
+
+        # スケール情報が設定されているか確認
+        if not hasattr(target_canvas, 'scale_factor'):
+            messagebox.showwarning('警告', 'プレビューの準備ができていません。\n再度お試しください。')
+            return
+
+        # ターゲット選択用の情報を保存
+        self.target_canvas = target_canvas
+        self.target_image_path = target_path
+
+        messagebox.showinfo('ターゲット選択',
+                           f'{target_type}画像プレビューでプラナリアをクリックしてください。\n'
+                           'クリックした位置の輝度・面積情報を基に検出パラメータを自動推定します。')
+
+        self.target_selecting = True
+        target_canvas.bind("<Button-1>", self.on_target_click)
+        self.log_output(f'ターゲット選択モードを開始しました（{target_type}画像）。プラナリアをクリックしてください。')
+
+    def on_target_click(self, event):
+        """ターゲットクリック時の処理（昼・夜両方対応）"""
+        if not self.target_selecting:
+            return
+
+        self.target_selecting = False
+
+        # 使用するキャンバスと画像パスを取得
+        target_canvas = getattr(self, 'target_canvas', self.day_canvas)
+        target_path = getattr(self, 'target_image_path', self.day_img_path.get())
+
+        target_canvas.unbind("<Button-1>")
+
+        # クリック座標を元画像座標に変換
+        if hasattr(target_canvas, 'image_offset_x') and hasattr(target_canvas, 'scale_factor'):
+            offset_x = getattr(target_canvas, 'image_offset_x', 0)
+            offset_y = getattr(target_canvas, 'image_offset_y', 0)
+            scale_factor = getattr(target_canvas, 'scale_factor', 1.0)
+
+            # ゼロ除算防止
+            if scale_factor <= 0:
+                scale_factor = 1.0
+
+            # キャンバス座標をプレビュー画像座標に変換
+            preview_x = max(0, event.x - offset_x)
+            preview_y = max(0, event.y - offset_y)
+
+            # プレビュー画像座標を元画像座標に変換
+            # ROIが有効な場合はROIオフセットを加算
+            roi_offset_x, roi_offset_y = 0, 0
+            if self.roi_active.get() and self.roi_coordinates:
+                center_x, center_y, radius = self.roi_coordinates
+                roi_offset_x = max(0, center_x - radius)
+                roi_offset_y = max(0, center_y - radius)
+
+            orig_x = int(preview_x / scale_factor) + roi_offset_x
+            orig_y = int(preview_y / scale_factor) + roi_offset_y
+
+            self.log_output(f'クリック位置: キャンバス({event.x},{event.y}) → 元画像({orig_x},{orig_y})')
+
+            # 元画像を読み込んでターゲット情報を取得
+            self.analyze_target_at_position(orig_x, orig_y, target_path)
+
+    def analyze_target_at_position(self, x, y, image_path=None):
+        """指定位置のターゲット情報を解析（昼・夜両方対応）"""
+        try:
+            # 画像パスが指定されていない場合は昼画像を使用
+            if image_path is None:
+                image_path = self.day_img_path.get()
+
+            if not image_path or not os.path.exists(image_path):
+                self.log_output('画像が見つかりません')
+                return
+
+            image = cv2.imread(image_path)
+            if image is None:
+                self.log_output('画像を読み込めませんでした')
+                return
+
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+            # 座標が画像範囲内か確認
+            if x < 0 or x >= gray.shape[1] or y < 0 or y >= gray.shape[0]:
+                self.log_output(f'クリック位置({x},{y})が画像範囲外です（画像サイズ: {gray.shape[1]}x{gray.shape[0]}）')
+                return
+
+            # クリック位置周辺の輝度を取得（5x5ピクセルの平均）
+            sample_size = 5
+            x1 = max(0, x - sample_size)
+            y1 = max(0, y - sample_size)
+            x2 = min(gray.shape[1], x + sample_size)
+            y2 = min(gray.shape[0], y + sample_size)
+
+            target_brightness = float(np.mean(gray[y1:y2, x1:x2]))
+            background_brightness = float(np.mean(gray))
+
+            # 輝度差を計算
+            brightness_diff = float(background_brightness - target_brightness)
+
+            self.log_output(f'ターゲット輝度: {target_brightness:.1f}')
+            self.log_output(f'背景輝度: {background_brightness:.1f}')
+            self.log_output(f'輝度差: {brightness_diff:.1f}')
+
+            # 自動背景補正を適用してターゲットを検出
+            corrected = auto_background_correction(image, method='adaptive')
+
+            if corrected is None:
+                self.log_output('背景補正に失敗しました')
+                return
+
+            # 補正後の画像で閾値を自動推定
+            corrected_target_val = int(corrected[y, x]) if 0 <= y < corrected.shape[0] and 0 <= x < corrected.shape[1] else 0
+
+            # 複数の方法でターゲット検出を試行
+            target_contour = None
+            target_area = 0
+
+            # 方法1: Otsuの二値化
+            _, binary_otsu = cv2.threshold(corrected, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            contours, _ = cv2.findContours(binary_otsu, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for cnt in contours:
+                if cv2.pointPolygonTest(cnt, (x, y), False) >= 0:
+                    target_contour = cnt
+                    target_area = float(cv2.contourArea(cnt))
+                    self.log_output('検出方法: Otsu二値化')
+                    break
+
+            # 方法2: Otsuで失敗した場合、適応的二値化を試行
+            if target_contour is None:
+                binary_adaptive = cv2.adaptiveThreshold(
+                    corrected, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                    cv2.THRESH_BINARY, 15, 5
+                )
+                contours, _ = cv2.findContours(binary_adaptive, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                for cnt in contours:
+                    if cv2.pointPolygonTest(cnt, (x, y), False) >= 0:
+                        target_contour = cnt
+                        target_area = float(cv2.contourArea(cnt))
+                        self.log_output('検出方法: 適応的二値化')
+                        break
+
+            # 方法3: それでも失敗した場合、クリック位置周辺の局所的な閾値で検出
+            if target_contour is None:
+                # クリック位置中心の領域を切り出し
+                search_radius = 100
+                sx1 = max(0, x - search_radius)
+                sy1 = max(0, y - search_radius)
+                sx2 = min(gray.shape[1], x + search_radius)
+                sy2 = min(gray.shape[0], y + search_radius)
+                local_gray = gray[sy1:sy2, sx1:sx2]
+
+                # 局所領域でOtsu
+                _, local_binary = cv2.threshold(local_gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+                contours, _ = cv2.findContours(local_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+                # 局所座標に変換
+                local_x = x - sx1
+                local_y = y - sy1
+
+                for cnt in contours:
+                    if cv2.pointPolygonTest(cnt, (local_x, local_y), False) >= 0:
+                        target_contour = cnt
+                        target_area = float(cv2.contourArea(cnt))
+                        self.log_output('検出方法: 局所Otsu二値化')
+                        break
+
+            # 方法4: 最後の手段として、クリック位置に最も近い輪郭を選択
+            if target_contour is None and contours:
+                min_dist = float('inf')
+                for cnt in contours:
+                    M = cv2.moments(cnt)
+                    if M['m00'] > 0:
+                        cx = int(M['m10'] / M['m00'])
+                        cy = int(M['m01'] / M['m00'])
+                        dist = np.sqrt((cx - x)**2 + (cy - y)**2)
+                        if dist < min_dist:
+                            min_dist = dist
+                            target_contour = cnt
+                            target_area = float(cv2.contourArea(cnt))
+                if target_contour is not None:
+                    self.log_output(f'検出方法: 最近傍輪郭（距離: {min_dist:.1f}px）')
+
+            if target_contour is not None and target_area > 0:
+                # ターゲット情報を保存（JSON保存可能なPython型に変換）
+                self.target_info = {
+                    'x': int(x),
+                    'y': int(y),
+                    'brightness': target_brightness,
+                    'background_brightness': background_brightness,
+                    'brightness_diff': brightness_diff,
+                    'area': target_area,
+                    'corrected_target_val': corrected_target_val
+                }
+
+                self.learned_brightness = target_brightness
+                self.learned_area_range = (int(target_area * 0.5), int(target_area * 2.0))
+
+                self.target_info_label.config(text=f'面積:{target_area:.0f}')
+                self.log_output(f'ターゲットを検出しました: 面積={target_area:.0f}px²')
+                self.log_output(f'推定面積範囲: {self.learned_area_range[0]} - {self.learned_area_range[1]}')
+
+                # 検出結果をプレビューに反映
+                self.update_preview()
+            else:
+                self.log_output('ターゲットを検出できませんでした。別の位置をクリックしてください。')
+                self.target_info_label.config(text='検出失敗')
+                messagebox.showwarning('警告', 'ターゲットを検出できませんでした。\nプラナリアの中心付近をクリックしてください。')
+
+        except Exception as e:
+            self.log_output(f'ターゲット解析エラー: {e}')
+            self.target_info_label.config(text='エラー')
+            messagebox.showerror('エラー', f'ターゲット解析中にエラーが発生しました:\n{e}')
+
+    def apply_learned_params(self):
+        """学習したパラメータを検出設定に適用"""
+        try:
+            if self.target_info is None:
+                messagebox.showwarning('警告', '先にターゲットを選択してください')
+                return
+
+            # 学習した面積範囲を適用
+            if self.learned_area_range:
+                self.min_area.set(str(self.learned_area_range[0]))
+                self.max_area.set(str(self.learned_area_range[1]))
+                self.log_output(f'面積範囲を更新しました: {self.learned_area_range[0]} - {self.learned_area_range[1]}')
+
+            # 自動背景補正を有効化
+            self.use_auto_bg_correction.set(True)
+            self.log_output('自動背景補正を有効にしました')
+
+            # 相対閾値を調整（輝度差に基づく）
+            brightness_diff = self.target_info.get('brightness_diff', 0)
+            background_brightness = self.target_info.get('background_brightness', 1)  # ゼロ除算防止
+            if brightness_diff > 0 and background_brightness > 0:
+                # 背景より暗いターゲット（プラナリア）
+                suggested_thresh = min(0.3, brightness_diff / background_brightness)
+                self.relative_thresh.set(round(suggested_thresh, 2))
+                self.log_output(f'相対閾値を {suggested_thresh:.2f} に設定しました')
+
+            self.update_preview()
+            messagebox.showinfo('適用完了', '学習したパラメータを適用しました。\nプレビューを確認してください。')
+        except Exception as e:
+            self.log_output(f'パラメータ適用エラー: {e}')
+            messagebox.showerror('エラー', f'パラメータ適用中にエラーが発生しました:\n{e}')
+
+    def clear_target(self):
+        """ターゲット選択をクリア"""
+        self.target_info = None
+        self.learned_brightness = None
+        self.learned_area_range = None
+        self.target_selecting = False
+        self.target_info_label.config(text='未選択')
+        self.day_canvas.unbind("<Button-1>")
+        self.log_output('ターゲット選択をクリアしました')
+
+    # =============================================================================
     # ROI関連メソッド
+    # =============================================================================
     def toggle_roi(self):
         if self.roi_active.get():
             self.log_output('ROI機能を有効にしました')
@@ -1412,6 +1985,10 @@ class AnimalDetectorGUI:
             offset_y = getattr(self.day_canvas, 'image_offset_y', 0)
             scale_factor = getattr(self.day_canvas, 'scale_factor', 1.0)
 
+            # ゼロ除算防止
+            if scale_factor <= 0:
+                scale_factor = 1.0
+
             # キャンバス座標をプレビュー画像座標に変換
             preview_center_x = max(0, self.roi_start_x - offset_x)
             preview_center_y = max(0, self.roi_start_y - offset_y)
@@ -1425,6 +2002,11 @@ class AnimalDetectorGUI:
             orig_center_x = int(preview_center_x / scale_factor)
             orig_center_y = int(preview_center_y / scale_factor)
             orig_radius = int(preview_radius / scale_factor)
+
+            # 有効なROIかチェック
+            if orig_radius <= 0:
+                self.log_output('ROIが小さすぎます。再度ドラッグしてください。')
+                return
 
             # 円形ROI座標として保存（中心座標と半径）
             self.roi_coordinates = (orig_center_x, orig_center_y, orig_radius)
@@ -1501,6 +2083,9 @@ class AnimalDetectorGUI:
             roi_img = image[y1:y2, x1:x2]
 
         try:
+            display_img = None
+            title = ""
+
             if mode == 'original':
                 # 元画像を表示
                 display_img = roi_img.copy()
@@ -1534,6 +2119,11 @@ class AnimalDetectorGUI:
                 subtracted = apply_temporal_median_subtraction(roi_img, bg_roi)
                 display_img = cv2.cvtColor(subtracted, cv2.COLOR_GRAY2BGR)
                 title = "背景減算結果"
+
+            # display_imgがNoneの場合はエラー
+            if display_img is None:
+                self.log_output('背景プレビューエラー: 表示画像が作成されませんでした')
+                return
 
             # プレビューサイズに調整
             resized_img = self.resize_image_for_canvas(display_img)
@@ -1590,16 +2180,26 @@ class AnimalDetectorGUI:
             'day_start_time': self.day_start_time.get(),
             'night_start_time': self.night_start_time.get(),
             'measurement_start_time': self.measurement_start_time.get(),
+            'frame_interval': self.frame_interval.get(),  # フレーム間隔
             'roi_coordinates': self.roi_coordinates,
-            # コントラスト調整設定を追加
+            # 自動背景補正設定
+            'use_auto_bg_correction': self.use_auto_bg_correction.get(),
+            'auto_bg_method': self.auto_bg_method.get(),
+            # 内部均一性フィルタ設定
+            'use_uniformity_filter': self.use_uniformity_filter.get(),
+            'min_uniformity': self.min_uniformity.get(),
+            # コントラスト調整設定
             'use_contrast_enhancement': self.use_contrast_enhancement.get(),
             'contrast_alpha': self.contrast_alpha.get(),
             'brightness_beta': self.brightness_beta.get(),
             'use_clahe': self.use_clahe.get(),
             'clahe_clip_limit': self.clahe_clip_limit.get(),
-            # エッジ強調設定を追加
+            # エッジ強調設定
             'use_edge_enhancement': self.use_edge_enhancement.get(),
-            'edge_weight': self.edge_weight.get()
+            'edge_weight': self.edge_weight.get(),
+            # ターゲット選択情報
+            'target_info': self.target_info,
+            'learned_area_range': self.learned_area_range
         }
 
         # JSONファイルに保存
@@ -1622,47 +2222,68 @@ class AnimalDetectorGUI:
         self.folder_path.set(config.get('folder_path', ''))
         self.day_img_path.set(config.get('day_img_path', ''))
         self.night_img_path.set(config.get('night_img_path', ''))
-        self.min_area.set(config.get('min_area', '100'))
-        self.max_area.set(config.get('max_area', '10000'))
+        self.min_area.set(config.get('min_area', str(DEFAULT_MIN_AREA)))
+        self.max_area.set(config.get('max_area', str(DEFAULT_MAX_AREA)))
         self.binarize_method.set(config.get('binarize_method', 'adaptive'))
-        self.relative_thresh.set(config.get('relative_thresh', 0.15))
-        self.block_size.set(config.get('block_size', 15))
-        self.c_value.set(config.get('c_value', 8))
+        self.relative_thresh.set(config.get('relative_thresh', DEFAULT_RELATIVE_THRESH))
+        self.block_size.set(config.get('block_size', DEFAULT_BLOCK_SIZE))
+        self.c_value.set(config.get('c_value', DEFAULT_C_VALUE))
         self.use_bg_removal.set(config.get('use_bg_removal', False))
-        self.bg_kernel_size.set(config.get('bg_kernel_size', 31))
+        self.bg_kernel_size.set(config.get('bg_kernel_size', DEFAULT_BG_KERNEL_SIZE))
         self.use_temporal_median.set(config.get('use_temporal_median', False))
-        self.temporal_frames.set(config.get('temporal_frames', 100))
+        self.temporal_frames.set(config.get('temporal_frames', DEFAULT_TEMPORAL_FRAMES))
         self.save_video.set(config.get('save_video', False))
-        self.video_fps.set(config.get('video_fps', 10))
-        self.video_scale.set(config.get('video_scale', 0.5))
-        self.day_start_time.set(config.get('day_start_time', '00:00'))
-        self.night_start_time.set(config.get('night_start_time', '12:00'))
+        self.video_fps.set(config.get('video_fps', DEFAULT_VIDEO_FPS))
+        self.video_scale.set(config.get('video_scale', DEFAULT_VIDEO_SCALE))
+        self.day_start_time.set(config.get('day_start_time', '07:00'))
+        self.night_start_time.set(config.get('night_start_time', '19:00'))
         self.measurement_start_time.set(config.get('measurement_start_time', '09:00:00'))
+        self.frame_interval.set(config.get('frame_interval', FRAME_INTERVAL_SECONDS))
         self.roi_coordinates = config.get('roi_coordinates', None)
+
+        # 自動背景補正設定をロード
+        self.use_auto_bg_correction.set(config.get('use_auto_bg_correction', False))
+        self.auto_bg_method.set(config.get('auto_bg_method', 'adaptive'))
+
+        # 内部均一性フィルタ設定をロード
+        self.use_uniformity_filter.set(config.get('use_uniformity_filter', False))
+        self.min_uniformity.set(config.get('min_uniformity', DEFAULT_MIN_UNIFORMITY))
 
         # コントラスト調整設定をロード
         self.use_contrast_enhancement.set(config.get('use_contrast_enhancement', False))
-        self.contrast_alpha.set(config.get('contrast_alpha', 1.5))
+        self.contrast_alpha.set(config.get('contrast_alpha', DEFAULT_CONTRAST_ALPHA))
         self.brightness_beta.set(config.get('brightness_beta', 0))
         self.use_clahe.set(config.get('use_clahe', False))
-        self.clahe_clip_limit.set(config.get('clahe_clip_limit', 3.0))
+        self.clahe_clip_limit.set(config.get('clahe_clip_limit', DEFAULT_CLAHE_CLIP_LIMIT))
 
         # エッジ強調設定をロード
         self.use_edge_enhancement.set(config.get('use_edge_enhancement', False))
-        self.edge_weight.set(config.get('edge_weight', 0.3))
+        self.edge_weight.set(config.get('edge_weight', DEFAULT_EDGE_WEIGHT))
+
+        # ターゲット選択情報をロード
+        self.target_info = config.get('target_info', None)
+        self.learned_area_range = config.get('learned_area_range', None)
+        if self.target_info:
+            self.target_info_label.config(text=f"面積:{self.target_info.get('area', 0):.0f}")
+        else:
+            self.target_info_label.config(text='未選択')
 
         self.log_output(f'設定をロードしました: {file_path}')
+
+        # 自動背景補正設定の反映をログに出力
+        if self.use_auto_bg_correction.get():
+            self.log_output(f'自動背景補正: 有効 (方式={self.auto_bg_method.get()})')
+
+        # 内部均一性フィルタ設定の反映をログに出力
+        if self.use_uniformity_filter.get():
+            self.log_output(f'内部均一性フィルタ: 有効 (閾値={self.min_uniformity.get()})')
 
         # コントラスト調整設定の反映をログに出力
         if self.use_contrast_enhancement.get():
             self.log_output(f'コントラスト調整: 有効 (倍率={self.contrast_alpha.get()}, 明度={self.brightness_beta.get()})')
-        else:
-            self.log_output('コントラスト調整: 無効')
-        
+
         if self.use_clahe.get():
             self.log_output(f'CLAHE: 有効 (制限={self.clahe_clip_limit.get()})')
-        else:
-            self.log_output('CLAHE: 無効')
 
         # プレビューを更新
         self.update_preview()
@@ -1688,111 +2309,20 @@ class AnimalDetectorGUI:
         # Temporal Median Filterのステータス更新
         if self.use_temporal_median.get() and self.temporal_background is None:
             self.temporal_status_label.config(text='背景未作成')
-        else:
+        elif self.temporal_background is not None:
             self.temporal_status_label.config(text='背景作成済み')
 
-        # 動画保存設定の反映
-        if self.save_video.get():
-            self.log_output('動画保存: 有効')
-        else:
-            self.log_output('動画保存: 無効')
+        # 主要設定のサマリーログ
+        self.log_output(f'時間設定: 昼={self.day_start_time.get()}, 夜={self.night_start_time.get()}, '
+                       f'測定開始={self.measurement_start_time.get()}, 間隔={self.frame_interval.get()}秒')
 
-        # バックグラウンド除去設定の反映
-        if self.use_bg_removal.get():
-            self.log_output('バックグラウンド除去: 有効')
-        else:
-            self.log_output('バックグラウンド除去: 無効')
-
-        # ROI設定の反映
-        if self.roi_active.get():
-            self.log_output('ROI機能: 有効')
-        else:
-            self.log_output('ROI機能: 無効')
-
-        # 解析結果ファイルのパスを更新
-        analysis_results_path = os.path.join(self.folder_path.get(), 'analysis_results.csv')
-        if os.path.exists(analysis_results_path):
-            self.log_output(f'解析結果ファイル: {analysis_results_path}')
-        else:
-            self.log_output('解析結果ファイル: 未作成')
-
-        # 時間設定の反映
-        self.log_output(f'昼開始時刻: {self.day_start_time.get()}')
-        self.log_output(f'夜開始時刻: {self.night_start_time.get()}')
-        self.log_output(f'測定開始時刻: {self.measurement_start_time.get()}')
-
-        # グラフ描画のための時刻データの確認
-        timelog_path = os.path.join(self.folder_path.get(), 'timelog.txt')
-        if os.path.exists(timelog_path):
-            self.log_output(f'timelog.txt: {timelog_path} （存在します）')
-        else:
-            self.log_output(f'timelog.txt: {timelog_path} （存在しません）')
-
-        # すぐに解析結果グラフを表示（オプション）
-        # self.root.after(100, self.plot_results, pd.read_csv(analysis_results_path))
-
-        # Temporal Median Filterの背景画像をプレビューに反映
-        if self.temporal_background is not None:
-            bg_preview = cv2.cvtColor(self.temporal_background, cv2.COLOR_GRAY2BGR)
-            bg_preview = self.resize_image_for_canvas(bg_preview, 300, 200)
-            bg_preview_rgb = cv2.cvtColor(bg_preview, cv2.COLOR_BGR2RGB)
-            pil_bg_img = Image.fromarray(bg_preview_rgb)
-            photo_bg = ImageTk.PhotoImage(pil_bg_img)
-
-            # 背景画像キャンバスに描画
-            self.day_canvas.delete("all")
-            self.day_canvas.create_image(0, 0, anchor=tk.NW, image=photo_bg)
-            self.day_canvas.image = photo_bg  # 参照を保持
-
-            self.log_output('Temporal Median Filterの背景画像をプレビューに反映しました')
-
-        # すぐに プレビューを更新
+        # すぐにプレビューを更新
         self.root.after(100, self.update_preview)
 
-    def apply_circular_roi(image, center_x, center_y, radius):
-        """
-        円形ROIを画像に適用する関数
 
-        Args:
-            image: 入力画像
-            center_x, center_y: 円の中心座標
-            radius: 円の半径
-
-        Returns:
-            roi_img: 円形ROIが適用された画像（矩形切り出し）
-            mask: 円形マスク
-            offset_x, offset_y: 切り出し画像のオフセット
-        """
-        h, w = image.shape[:2]
-
-        # 円を含む最小の矩形を計算
-        x1 = max(0, center_x - radius)
-        y1 = max(0, center_y - radius)
-        x2 = min(w, center_x + radius)
-        y2 = min(h, center_y + radius)
-
-        # 矩形で切り出し
-        roi_img = image[y1:y2, x1:x2]
-
-        # 円形マスクを作成
-        mask_h, mask_w = roi_img.shape[:2]
-        mask = np.zeros((mask_h, mask_w), dtype=np.uint8)
-
-        # 切り出し画像内での円の中心座標
-        mask_center_x = center_x - x1
-        mask_center_y = center_y - y1
-
-        cv2.circle(mask, (mask_center_x, mask_center_y), radius, 255, -1)
-
-        # マスクを適用
-        if len(roi_img.shape) == 3:
-            roi_img = cv2.bitwise_and(roi_img, roi_img, mask=mask)
-        else:
-            roi_img = cv2.bitwise_and(roi_img, roi_img, mask=mask)
-
-        return roi_img, mask, x1, y1
-
+# =============================================================================
 # エントリーポイント
+# =============================================================================
 def main():
     root = tk.Tk()
     app = AnimalDetectorGUI(root)
@@ -1801,4 +2331,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
