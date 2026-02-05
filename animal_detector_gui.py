@@ -3,7 +3,6 @@ from tkinter import filedialog, messagebox, scrolledtext, ttk
 from PIL import Image, ImageTk
 import cv2
 import numpy as np
-from skimage.morphology import white_tophat, disk
 import os
 import re
 import pandas as pd
@@ -117,6 +116,20 @@ def apply_temporal_median_subtraction(image, background):
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
     # 背景を引き算
+def apply_temporal_median_subtraction(image, background):
+    """
+    画像から背景を引き算して前景を抽出
+
+    Args:
+        image: 元画像
+        background: 背景画像
+
+    Returns:
+        foreground: 前景画像
+    """
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+    # 背景を引き算
     foreground = cv2.subtract(gray, background)
 
     # コントラストを強調
@@ -124,51 +137,39 @@ def apply_temporal_median_subtraction(image, background):
 
     return foreground
 
-def remove_background_rolling_ball(image, radius=50):
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    selem = disk(radius)
-    bg_removed = white_tophat(gray, selem)
-    return bg_removed
-
-def remove_background_rolling_ball_improved(image, radius=50):
-    """
-    ImageJのRolling Ball Background Subtractionにより近い実装
-    """
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-
-    # より大きなカーネルサイズでモルフォロジー処理
-    kernel_size = max(radius * 2 + 1, 3)  # radiusの2倍+1、最小3
-    if kernel_size % 2 == 0:
-        kernel_size += 1  # 奇数にする
-
-    # Top-hat変換による背景除去
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
-    tophat = cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, kernel)
-
-    # ガウシアンフィルタでノイズを軽減
-    tophat = cv2.GaussianBlur(tophat, (3, 3), 0)
-
-    return tophat
-
 def remove_background_simple(image, kernel_size=50):
-    """軽量なバックグラウンド除去（ガウシアンブラー使用）"""
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    """
+    軽量なバックグラウンド除去（ガウシアンブラー使用）
 
-    # カーネルサイズを奇数に調整
-    if kernel_size % 2 == 0:
-        kernel_size += 1
+    Args:
+        image: 入力画像（BGR形式）
+        kernel_size: カーネルサイズ
 
-    # 最小値を3に設定
-    kernel_size = max(3, kernel_size)
+    Returns:
+        foreground: 前景画像（グレースケール）
+    """
+    try:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
-    background = cv2.GaussianBlur(gray, (kernel_size, kernel_size), 0)
-    foreground = cv2.subtract(gray, background)
-    return foreground
+        # カーネルサイズを奇数に調整
+        if kernel_size % 2 == 0:
+            kernel_size += 1
+
+        # 最小値を3に設定
+        kernel_size = max(3, kernel_size)
+
+        background = cv2.GaussianBlur(gray, (kernel_size, kernel_size), 0)
+        foreground = cv2.subtract(gray, background)
+        return foreground
+    except Exception as e:
+        print(f"remove_background_simple error: {e}")
+        # エラー時はグレースケール画像をそのまま返す
+        return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
 
 
 def auto_background_correction(image, method='adaptive'):
     """
-    自動背景補正機能（プラナリア検出に最適化）
+    自動背景補正機能（プラナリア検出に最適化・高速化版）
 
     プラナリアの特性：
     - 背景に対して暗い物体
@@ -178,9 +179,9 @@ def auto_background_correction(image, method='adaptive'):
     Args:
         image: 入力画像（BGR形式）
         method: 補正方法
-            - 'adaptive': 適応的な背景補正（推奨）
-            - 'rolling_ball': Rolling Ball法
-            - 'morphological': モルフォロジー法
+            - 'adaptive': 適応的な背景補正（推奨・最速）
+            - 'morphological': モルフォロジー法（高速）
+            - 'rolling_ball': Rolling Ball法（やや重い）
 
     Returns:
         corrected_image: 背景補正後の画像（グレースケール、コントラスト強調済み）
@@ -196,7 +197,7 @@ def auto_background_correction(image, method='adaptive'):
             gray = image.copy()
 
         if method == 'adaptive':
-            # 適応的背景補正：複数スケールで背景を推定
+            # 適応的背景補正：ガウシアンブラーで高速に背景を推定
             # 大きなカーネルで背景を推定
             bg_large = cv2.GaussianBlur(gray, (AUTO_BG_GAUSSIAN_KERNEL, AUTO_BG_GAUSSIAN_KERNEL), 0)
 
@@ -209,16 +210,20 @@ def auto_background_correction(image, method='adaptive'):
 
         elif method == 'rolling_ball':
             # Rolling Ball法（OpenCVのモルフォロジー処理で軽量化）
-            # scikit-imageのblack_tophatは重いため、OpenCVで代替
+            # Black-hatを使用（暗い物体検出用）
             kernel_size = AUTO_BG_CORRECTION_RADIUS * 2 + 1
+            if kernel_size % 2 == 0:
+                kernel_size += 1
             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
             # プラナリアは暗いので、black_tophat（= closing - 元画像）を使用
             corrected = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel)
             corrected = cv2.normalize(corrected, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
 
         elif method == 'morphological':
-            # モルフォロジー法：Opening操作で背景を推定（軽量化）
+            # モルフォロジー法：Opening操作で背景を推定（高速版）
             kernel_size = AUTO_BG_CORRECTION_RADIUS * 2 + 1
+            if kernel_size % 2 == 0:
+                kernel_size += 1
             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
             bg_morph = cv2.morphologyEx(gray, cv2.MORPH_OPEN, kernel)
             corrected = cv2.subtract(bg_morph, gray)
@@ -1031,47 +1036,63 @@ class AnimalDetectorGUI:
 
     def show_preview(self, image, min_area, max_area, canvas, time_type):
         try:
+            # 入力画像のバリデーション
+            if image is None or image.size == 0:
+                print(f"show_preview: Invalid image for {time_type}")
+                return
+
             # 元画像のサイズを取得
             original_h, original_w = image.shape[:2]
 
             # ROIが有効な場合は対象領域を切り出し
-            roi_img = image
+            roi_img = image.copy()
             roi_offset_x, roi_offset_y = 0, 0
             if self.roi_active.get() and self.roi_coordinates:
-                # 円形ROI座標（center_x, center_y, radius）を矩形座標に変換
-                center_x, center_y, radius = self.roi_coordinates
-                x1 = max(0, center_x - radius)
-                y1 = max(0, center_y - radius)
-                x2 = min(image.shape[1], center_x + radius)
-                y2 = min(image.shape[0], center_y + radius)
-                if x2 > x1 and y2 > y1:  # 有効なROIかチェック
-                    roi_img = image[y1:y2, x1:x2]
-                    roi_offset_x, roi_offset_y = x1, y1
+                try:
+                    # 円形ROI座標（center_x, center_y, radius）を矩形座標に変換
+                    center_x, center_y, radius = self.roi_coordinates
+                    x1 = max(0, int(center_x - radius))
+                    y1 = max(0, int(center_y - radius))
+                    x2 = min(image.shape[1], int(center_x + radius))
+                    y2 = min(image.shape[0], int(center_y + radius))
+                    if x2 > x1 and y2 > y1:  # 有効なROIかチェック
+                        roi_img = image[y1:y2, x1:x2].copy()
+                        roi_offset_x, roi_offset_y = x1, y1
+                except Exception as e:
+                    print(f"ROI extraction error: {e}")
+                    roi_img = image.copy()
 
             # 自動背景補正を適用（新機能）
             if self.use_auto_bg_correction.get():
-                corrected = auto_background_correction(roi_img, method=self.auto_bg_method.get())
-                # Noneチェック
-                if corrected is not None:
-                    roi_img = cv2.cvtColor(corrected, cv2.COLOR_GRAY2BGR)
+                try:
+                    corrected = auto_background_correction(roi_img, method=self.auto_bg_method.get())
+                    # Noneチェック
+                    if corrected is not None:
+                        roi_img = cv2.cvtColor(corrected, cv2.COLOR_GRAY2BGR)
+                except Exception as e:
+                    print(f"Background correction error: {e}")
 
             # コントラスト調整を適用
             if self.use_contrast_enhancement.get() or self.use_clahe.get():
                 try:
-                    alpha = self.contrast_alpha.get()
-                    beta = self.brightness_beta.get()
-                    clip_limit = self.clahe_clip_limit.get()
+                    alpha = float(self.contrast_alpha.get())
+                    beta = int(self.brightness_beta.get())
+                    clip_limit = float(self.clahe_clip_limit.get())
                     roi_img = enhance_contrast(roi_img,
                                              use_contrast=self.use_contrast_enhancement.get(),
                                              alpha=alpha, beta=beta,
                                              use_clahe=self.use_clahe.get(),
                                              clip_limit=clip_limit)
-                except ValueError:
+                except (ValueError, Exception) as e:
                     # パラメータエラーの場合はコントラスト調整をスキップ
-                    pass
+                    print(f"Contrast adjustment error: {e}")
 
             # 画像を適切なサイズにリサイズ
             resized_img = self.resize_image_for_canvas(roi_img)
+            if resized_img is None or resized_img.size == 0:
+                print(f"Resize failed for {time_type}")
+                return
+
             resized_h, resized_w = resized_img.shape[:2]
 
             # スケール比を計算
@@ -1683,20 +1704,24 @@ class AnimalDetectorGUI:
         self.log_output(f'ターゲット選択モードを開始しました（{target_type}画像）。プラナリアをクリックしてください。')
 
     def on_target_click(self, event):
-        """ターゲットクリック時の処理（昼・夜両方対応）"""
-        if not self.target_selecting:
-            return
+        """ターゲットクリック時の処理（昼・夜両方対応・座標変換修正版）"""
+        try:
+            if not self.target_selecting:
+                return
 
-        self.target_selecting = False
+            self.target_selecting = False
 
-        # 使用するキャンバスと画像パスを取得
-        target_canvas = getattr(self, 'target_canvas', self.day_canvas)
-        target_path = getattr(self, 'target_image_path', self.day_img_path.get())
+            # 使用するキャンバスと画像パスを取得
+            target_canvas = getattr(self, 'target_canvas', self.day_canvas)
+            target_path = getattr(self, 'target_image_path', self.day_img_path.get())
 
-        target_canvas.unbind("<Button-1>")
+            target_canvas.unbind("<Button-1>")
 
-        # クリック座標を元画像座標に変換
-        if hasattr(target_canvas, 'image_offset_x') and hasattr(target_canvas, 'scale_factor'):
+            # クリック座標を元画像座標に変換
+            if not hasattr(target_canvas, 'scale_factor'):
+                self.log_output('エラー: キャンバスのスケール情報がありません')
+                return
+
             offset_x = getattr(target_canvas, 'image_offset_x', 0)
             offset_y = getattr(target_canvas, 'image_offset_y', 0)
             scale_factor = getattr(target_canvas, 'scale_factor', 1.0)
@@ -1714,8 +1739,8 @@ class AnimalDetectorGUI:
             roi_offset_x, roi_offset_y = 0, 0
             if self.roi_active.get() and self.roi_coordinates:
                 center_x, center_y, radius = self.roi_coordinates
-                roi_offset_x = max(0, center_x - radius)
-                roi_offset_y = max(0, center_y - radius)
+                roi_offset_x = max(0, int(center_x - radius))
+                roi_offset_y = max(0, int(center_y - radius))
 
             orig_x = int(preview_x / scale_factor) + roi_offset_x
             orig_y = int(preview_y / scale_factor) + roi_offset_y
@@ -1725,8 +1750,14 @@ class AnimalDetectorGUI:
             # 元画像を読み込んでターゲット情報を取得
             self.analyze_target_at_position(orig_x, orig_y, target_path)
 
+        except Exception as e:
+            self.log_output(f'ターゲットクリック処理エラー: {e}')
+            self.target_selecting = False
+            if hasattr(self, 'target_canvas'):
+                self.target_canvas.unbind("<Button-1>")
+
     def analyze_target_at_position(self, x, y, image_path=None):
-        """指定位置のターゲット情報を解析（昼・夜両方対応）"""
+        """指定位置のターゲット情報を解析（昼・夜両方対応・検出ロジック改善版）"""
         try:
             # 画像パスが指定されていない場合は昼画像を使用
             if image_path is None:
@@ -1769,80 +1800,74 @@ class AnimalDetectorGUI:
             corrected = auto_background_correction(image, method='adaptive')
 
             if corrected is None:
-                self.log_output('背景補正に失敗しました')
-                return
+                self.log_output('背景補正に失敗しました。元画像で検出を試行します。')
+                corrected = gray.copy()
 
             # 補正後の画像で閾値を自動推定
             corrected_target_val = int(corrected[y, x]) if 0 <= y < corrected.shape[0] and 0 <= x < corrected.shape[1] else 0
 
-            # 複数の方法でターゲット検出を試行
+            # 複数の方法でターゲット検出を試行（高速化・精度向上版）
             target_contour = None
             target_area = 0
+            detection_method = "未検出"
 
-            # 方法1: Otsuの二値化
-            _, binary_otsu = cv2.threshold(corrected, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            contours, _ = cv2.findContours(binary_otsu, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            # 方法1: クリック位置中心の局所的な閾値で検出（最優先・最速）
+            search_radius = 150
+            sx1 = max(0, x - search_radius)
+            sy1 = max(0, y - search_radius)
+            sx2 = min(gray.shape[1], x + search_radius)
+            sy2 = min(gray.shape[0], y + search_radius)
+            local_gray = gray[sy1:sy2, sx1:sx2]
+
+            # 局所領域でOtsu（暗い物体検出なのでINV）
+            _, local_binary = cv2.threshold(local_gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+            # ノイズ除去
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            local_binary = cv2.morphologyEx(local_binary, cv2.MORPH_OPEN, kernel)
+
+            contours, _ = cv2.findContours(local_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            # 局所座標に変換
+            local_x = x - sx1
+            local_y = y - sy1
+
             for cnt in contours:
-                if cv2.pointPolygonTest(cnt, (x, y), False) >= 0:
+                if cv2.pointPolygonTest(cnt, (local_x, local_y), False) >= 0:
                     target_contour = cnt
                     target_area = float(cv2.contourArea(cnt))
-                    self.log_output('検出方法: Otsu二値化')
+                    detection_method = "局所Otsu二値化"
                     break
 
-            # 方法2: Otsuで失敗した場合、適応的二値化を試行
+            # 方法2: 局所で失敗した場合、補正画像でOtsu
             if target_contour is None:
-                binary_adaptive = cv2.adaptiveThreshold(
-                    corrected, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                    cv2.THRESH_BINARY, 15, 5
-                )
-                contours, _ = cv2.findContours(binary_adaptive, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                _, binary_otsu = cv2.threshold(corrected, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                contours, _ = cv2.findContours(binary_otsu, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                 for cnt in contours:
                     if cv2.pointPolygonTest(cnt, (x, y), False) >= 0:
                         target_contour = cnt
                         target_area = float(cv2.contourArea(cnt))
-                        self.log_output('検出方法: 適応的二値化')
+                        detection_method = "Otsu二値化（背景補正後）"
                         break
 
-            # 方法3: それでも失敗した場合、クリック位置周辺の局所的な閾値で検出
-            if target_contour is None:
-                # クリック位置中心の領域を切り出し
-                search_radius = 100
-                sx1 = max(0, x - search_radius)
-                sy1 = max(0, y - search_radius)
-                sx2 = min(gray.shape[1], x + search_radius)
-                sy2 = min(gray.shape[0], y + search_radius)
-                local_gray = gray[sy1:sy2, sx1:sx2]
-
-                # 局所領域でOtsu
-                _, local_binary = cv2.threshold(local_gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-                contours, _ = cv2.findContours(local_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-                # 局所座標に変換
-                local_x = x - sx1
-                local_y = y - sy1
-
-                for cnt in contours:
-                    if cv2.pointPolygonTest(cnt, (local_x, local_y), False) >= 0:
-                        target_contour = cnt
-                        target_area = float(cv2.contourArea(cnt))
-                        self.log_output('検出方法: 局所Otsu二値化')
-                        break
-
-            # 方法4: 最後の手段として、クリック位置に最も近い輪郭を選択
-            if target_contour is None and contours:
+            # 方法3: 最近傍輪郭を選択（最後の手段）
+            if target_contour is None and len(contours) > 0:
                 min_dist = float('inf')
                 for cnt in contours:
                     M = cv2.moments(cnt)
                     if M['m00'] > 0:
                         cx = int(M['m10'] / M['m00'])
                         cy = int(M['m01'] / M['m00'])
+                        # 局所座標の場合は元座標に変換
+                        if detection_method == "未検出":
+                            cx += sx1
+                            cy += sy1
                         dist = np.sqrt((cx - x)**2 + (cy - y)**2)
-                        if dist < min_dist:
+                        if dist < min_dist and dist < 100:  # 100px以内
                             min_dist = dist
                             target_contour = cnt
                             target_area = float(cv2.contourArea(cnt))
-                if target_contour is not None:
-                    self.log_output(f'検出方法: 最近傍輪郭（距離: {min_dist:.1f}px）')
+                            detection_method = f"最近傍輪郭（距離: {min_dist:.1f}px）"
 
             if target_contour is not None and target_area > 0:
                 # ターゲット情報を保存（JSON保存可能なPython型に変換）
@@ -1857,10 +1882,11 @@ class AnimalDetectorGUI:
                 }
 
                 self.learned_brightness = target_brightness
-                self.learned_area_range = (int(target_area * 0.5), int(target_area * 2.0))
+                self.learned_area_range = (max(10, int(target_area * 0.3)), int(target_area * 3.0))
 
                 self.target_info_label.config(text=f'面積:{target_area:.0f}')
-                self.log_output(f'ターゲットを検出しました: 面積={target_area:.0f}px²')
+                self.log_output(f'ターゲットを検出: {detection_method}')
+                self.log_output(f'面積={target_area:.0f}px²')
                 self.log_output(f'推定面積範囲: {self.learned_area_range[0]} - {self.learned_area_range[1]}')
 
                 # 検出結果をプレビューに反映
@@ -1868,10 +1894,12 @@ class AnimalDetectorGUI:
             else:
                 self.log_output('ターゲットを検出できませんでした。別の位置をクリックしてください。')
                 self.target_info_label.config(text='検出失敗')
-                messagebox.showwarning('警告', 'ターゲットを検出できませんでした。\nプラナリアの中心付近をクリックしてください。')
+                messagebox.showwarning('警告', 'ターゲットを検出できませんでした。\nプラナリアの中心付近を正確にクリックしてください。')
 
         except Exception as e:
             self.log_output(f'ターゲット解析エラー: {e}')
+            import traceback
+            traceback.print_exc()
             self.target_info_label.config(text='エラー')
             messagebox.showerror('エラー', f'ターゲット解析中にエラーが発生しました:\n{e}')
 
