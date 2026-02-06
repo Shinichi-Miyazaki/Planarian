@@ -1,13 +1,12 @@
 # Planarian Detection & Behavior Analysis System
 
-プラナリア（または他の小動物）の自動検出・追跡・行動解析システムです。画像解析により個体の位置・面積・活動量を自動で測定し、行動解析を行います。
+プラナリアの自動検出・追跡・行動解析システム。画像解析により個体の位置・面積・活動量を自動測定し、行動解析を行います。
 
 ## システム概要
 
-本システムは、プラナリアの行動解析を自動化するための統合ツールです：
-- **画像検出（2つの手法）**: 従来の画像処理 + ディープラーニング
+- **セグメンテーション推論**: ディープラーニング（U-Net）による高精度検出
 - **行動解析**: 移動量・活動リズム・昼夜比較の統計解析
-- **可視化**: 時系列グラフ・ヒートマップ・動画生成
+- **可視化**: 時系列グラフ・統計レポート・動画生成
 
 ---
 
@@ -22,91 +21,233 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-**必要なライブラリ:**
-- `opencv-python`: 画像処理
-- `numpy`, `pandas`: 数値計算・データ処理
-- `matplotlib`, `scipy`: 可視化・統計解析
-- `Pillow`: GUI画像表示
-- `torch`, `torchvision`: ディープラーニング（GPU推奨）
-- `segmentation-models-pytorch`: U-Netモデル
-- `albumentations`: データ拡張
+---
+
+## 📁 プロジェクト構成
+
+```
+Planarian/
+├── behavior_analysis.py          # 行動解析スクリプト（CSVから解析）
+├── requirements.txt               # パッケージ依存関係
+├── README.md                      # このファイル
+├── segmentation/                  # セグメンテーションモジュール
+│   ├── run_inference_analysis.py  # 統合スクリプト（推論+解析）
+│   ├── inference_analysis_gui.py  # GUIランチャー
+│   ├── inference.py               # セグメンテーション推論
+│   ├── train.py                   # モデル学習
+│   ├── labeling_gui.py            # ラベリングツール
+│   ├── config.py                  # 設定ファイル
+│   ├── README.md                  # セグメンテーションガイド
+│   ├── data/                      # 学習データ
+│   ├── models/                    # 学習済みモデル
+│   ├── outputs/                   # 出力結果
+│   ├── docs/                      # ドキュメント
+│   └── legacy/                    # 旧バージョン・Colab用スクリプト
+├── docs/                          # システムドキュメント
+│   ├── GPU_COMPATIBILITY_ISSUE.md
+│   └── install_pytorch_gpu.md
+└── legacy/                        # 旧スクリプト
+    ├── animal_detector_gui.py     # 従来型画像処理GUI
+    ├── check_cuda.py
+    └── check_gpu.py
+```
 
 ---
 
-## 📊 システム構成
+## 🚀 クイックスタート
 
-### 1. 画像検出システム
+### 1. セグメンテーション推論 + 行動解析（推奨）
 
-#### 1-A. 従来手法 (`animal_detector_gui.py`)
-**特徴:**
-- 二値化・輪郭検出による自動検出
-- パラメータ調整による柔軟な対応
-- インタラクティブなターゲット選択
+**画像フォルダを指定して、一括で解析を実行:**
 
-**使い方:**
 ```powershell
-python animal_detector_gui.py
+cd segmentation
+
+# コマンドライン版
+python run_inference_analysis.py --images <画像フォルダ> --output <出力フォルダ>
+
+# GUI版
+python inference_analysis_gui.py
 ```
 
-**推奨パラメータ:**
-```
-メソッド: relative
-相対閾値: 0.15（標準）/ 0.20-0.30（夜間誤検出対策）
-最小面積: 100
-最大面積: 10000
-Select Largest Particle: ON
-自動背景補正: adaptive（推奨）
-```
+**出力:**
+- セグメンテーション結果CSV
+- 行動解析データ（移動量・不動性）
+- 時系列グラフ
+- 統計レポート（昼夜別）
+- セグメンテーション動画（オプション）
 
-**長所:**
-- パラメータ調整が容易
-- リアルタイムプレビュー
-- GPU不要
-
-**短所:**
-- 夜間画像や低コントラスト画像での検出精度が低い
-- パラメータのマニュアル調整が必要
+**詳細:** `segmentation/README.md`
 
 ---
 
-#### 1-B. ディープラーニング手法 (`segmentation/`)
-**特徴:**
-- U-Net（ResNet34エンコーダー + ImageNet事前学習済み重み）
-- セマンティックセグメンテーションによる高精度検出
-- 夜間画像や低コントラスト画像でも高精度
+### 2. CSVから行動解析のみ
 
-**ワークフロー:**
-1. **ラベリング**: `labeling_gui.py`で訓練データ作成（100枚以上推奨）
-2. **学習**: 
-   - **推奨**: Google Colabで学習（無料GPU、詳細は`segmentation/COLAB_TRAINING_GUIDE.md`）
-   - または: ローカルで`train.py`（CPUモード、遅い）
-3. **推論**: `inference.py`で検出実行（CSV + 動画出力）
+**既にCSVがある場合:**
 
-**⚠️ GPU互換性の注意:**
-- RTX 5070 Ti (sm_120) は現在のPyTorchで未対応
-- **Google Colabでのトレーニングを推奨**（無料GPU使用可能）
-- 詳細: `segmentation/COLAB_TRAINING_GUIDE.md`
+```powershell
+python behavior_analysis.py
+# → GUIでCSVファイルを選択
+```
 
-**詳細:**
+**出力:**
+- 移動量・不動性の時系列グラフ
+- 昼夜別統計CSV
+- サマリーレポート
+
+---
+
+## 📖 ドキュメント
+
+### メインドキュメント
+- **セグメンテーション**: `segmentation/README.md`
+- **行動解析**: このREADMEの後半
+
+### 追加ドキュメント（docs/）
+- `GPU_COMPATIBILITY_ISSUE.md`: GPU互換性の問題
+- `install_pytorch_gpu.md`: GPU版PyTorchインストール
+
+### セグメンテーションドキュメント（segmentation/docs/）
+- `COLAB_TRAINING_GUIDE.md`: Google Colabでの学習ガイド
+- `COLAB_SINGLE_CELL_GUIDE.md`: 単一セル学習（シンプル版）
+- `PATH_CONFIGURATION_GUIDE.md`: パス設定ガイド
+- `TEST_INFERENCE_VISUALIZATION.md`: 推論結果の可視化テスト
+
+---
+
+## 🔧 セグメンテーションモデルの学習
+
+### オプション1: Google Colab（推奨）
+
+**無料GPUを使用した高速学習:**
+
+1. `segmentation/legacy/train_colab.ipynb`をGoogle Colabで開く
+2. ガイドに従ってデータをアップロード
+3. 学習を実行（約30分〜1時間）
+4. 学習済みモデルをダウンロード
+
+**詳細:** `segmentation/docs/COLAB_TRAINING_GUIDE.md`
+
+### オプション2: ローカル学習
+
 ```powershell
 cd segmentation
 
 # 1. ラベリング（100枚以上推奨）
 python labeling_gui.py
-# → data/images/ と data/labels/ を指定
-# → ショートカット: N=次へ, P=前へ, S=保存, C=クリア, D=描画, E=消しゴム
 
-# 2. 学習（2つの方法）
+```
 
-# 方法A: Google Colabで学習（推奨・GPU使用）
-python create_data_zip.py  # データをZIP圧縮
-# → train_colab.ipynb をGoogle Colabにアップロード
-# → GPUランタイムで実行
-# → best_unet.pth をダウンロードして models/ に配置
-# 詳細: COLAB_TRAINING_GUIDE.md
+**詳細:** `segmentation/README.md`
 
-# 方法B: ローカルで学習（CPUモード・遅い）
-python train.py
+---
+
+## 📊 行動解析
+
+### CSVから行動解析を実行
+
+```powershell
+python behavior_analysis.py
+# → GUIでCSVファイルを選択
+```
+
+### 機能
+
+1. **移動量計算**: フレーム間の重心移動距離
+2. **不動性判定**: 移動量3ピクセル以下を不動とカウント
+3. **時間集約**: 10分間隔で集計
+4. **昼夜比較**: 昼夜サイクルに基づく統計解析
+
+### 出力
+
+- **グラフ（PNG）**:
+  - 移動量の時系列
+  - 不動性割合の時系列
+  - 体長の時系列
+  - 昼夜別の比較
+
+- **CSV**:
+  - `detailed_immobility_analysis.csv`: フレームごとの詳細データ
+  - `aggregated_immobility_analysis.csv`: 時間集約データ
+  - `day_night_summary.csv`: 昼夜別統計サマリー
+
+### 時間設定
+
+測定開始時刻と昼夜サイクルは`time_config.json`で設定:
+
+```json
+{
+  "day_start_time": "07:00",
+  "night_start_time": "19:00",
+  "measurement_start_time": "09:00:00",
+  "measurement_date": "2026-02-06"
+}
+```
+
+---
+
+## 🛠️ トラブルシューティング
+
+### パッケージインストールエラー
+
+```powershell
+# 基本パッケージのインストール
+pip install pandas matplotlib scipy opencv-python numpy torch torchvision segmentation-models-pytorch tqdm
+```
+
+**注意:** 推論時は**albumentationsは不要**です。ビルドエラーが出ても無視してOKです。
+
+---
+
+### albumentationsのビルドエラー（無視してOK）
+
+```
+error: Microsoft Visual C++ 14.0 or greater is required
+```
+
+**解決:** 推論時はalbumentations不要なので無視してください。
+
+学習時のみ必要ですが、Google Colabで学習する場合は問題ありません。
+
+---
+
+### GPU互換性
+
+- RTX 5070 Ti (sm_120)は現在のPyTorchで未対応
+- **Google Colabの使用を推奨**（無料GPU）
+- 詳細: `docs/GPU_COMPATIBILITY_ISSUE.md`
+
+### モデルファイルが見つからない
+
+```
+FileNotFoundError: モデルファイルが見つかりません
+```
+
+**解決方法:**
+1. Google Colabで学習済みモデルを生成
+2. `segmentation/models/best_unet.pth`に配置
+3. または`--model`オプションでパスを指定
+
+---
+
+## 📝 ライセンス・引用
+
+このプロジェクトを使用する場合は、適切な引用をお願いします。
+
+---
+
+## 🤝 貢献
+
+バグ報告や機能提案は、GitHubのIssueまでお願いします。
+
+---
+
+## 📞 サポート
+
+詳細なドキュメントは各ディレクトリのREADMEを参照してください：
+- セグメンテーション: `segmentation/README.md`
+- GPU問題: `docs/GPU_COMPATIBILITY_ISSUE.md`
+- Colab学習: `segmentation/docs/COLAB_TRAINING_GUIDE.md`
 # → models/best_unet.pth に保存
 # → outputs/training_history.png で学習曲線を確認
 

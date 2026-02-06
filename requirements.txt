@@ -9,6 +9,6 @@ scipy>=1.7.0
 torch>=2.0.0
 torchvision>=0.15.0
 segmentation-models-pytorch>=0.3.0
-albumentations>=1.3.0
+# albumentations>=1.3.0  # 推論では不要、学習時のみ必要（Colabで学習推奨）
 tqdm>=4.65.0
 

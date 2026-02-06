@@ -157,13 +157,32 @@ def load_model(model_path, encoder_name='resnet34', in_channels=3,
 
     # state_dictの形式を確認して読み込み
     if 'model_state_dict' in checkpoint:
-        model.load_state_dict(checkpoint['model_state_dict'])
+        state_dict = checkpoint['model_state_dict']
         print(f"モデルを読み込みました（Epoch {checkpoint.get('epoch', 'N/A')}）")
         print(f"  - Val Loss: {checkpoint.get('val_loss', 'N/A')}")
         print(f"  - Val Dice: {checkpoint.get('val_dice', 'N/A')}")
     else:
-        model.load_state_dict(checkpoint)
+        state_dict = checkpoint
         print(f"モデルを読み込みました")
+
+    # キー名の調整（互換性対応）
+    # 保存時: encoder.*, decoder.*, segmentation_head.*
+    # 期待: model.encoder.*, model.decoder.*, model.segmentation_head.*
+    new_state_dict = {}
+    for key, value in state_dict.items():
+        if key.startswith('encoder.') or key.startswith('decoder.') or key.startswith('segmentation_head.'):
+            # model. プレフィックスを追加
+            new_key = 'model.' + key
+            new_state_dict[new_key] = value
+        elif key.startswith('model.'):
+            # 既にmodel.プレフィックスがある場合はそのまま
+            new_state_dict[key] = value
+        else:
+            # その他のキーもそのまま
+            new_state_dict[key] = value
+
+    # strict=Falseで読み込み（num_batches_trackedなどの不一致を許容）
+    model.load_state_dict(new_state_dict, strict=False)
 
     model = model.to(device)
     model.eval()
