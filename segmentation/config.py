@@ -37,11 +37,13 @@ OUT_CHANNELS = 1  # バイナリセグメンテーション（プラナリア vs
 # 学習設定
 # =============================================================================
 # デバイス設定（GPU優先）
-DEVICE = 'cuda'  # RTX 5070 Ti使用
+# 注意: RTX 5070 Ti (sm_120) は PyTorch 2.6/2.7 では未対応のため、一時的にCPUを使用
+# PyTorch 2.8以降でsm_120サポートが追加される予定
+DEVICE = 'cpu'  # 'cuda' or 'cpu' - 現在はCPUモード
 
-# バッチサイズ（16GB VRAM想定）
-BATCH_SIZE = 8
-NUM_WORKERS = 4  # データローダーのワーカー数
+# バッチサイズ（CPUモード用に削減）
+BATCH_SIZE = 4  # GPU使用時は8推奨
+NUM_WORKERS = 2  # データローダーのワーカー数（CPUモード用に削減）
 
 # 学習率とオプティマイザー
 LEARNING_RATE = 1e-4

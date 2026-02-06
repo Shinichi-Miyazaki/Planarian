@@ -77,8 +77,15 @@ Select Largest Particle: ON
 
 **ワークフロー:**
 1. **ラベリング**: `labeling_gui.py`で訓練データ作成（100枚以上推奨）
-2. **学習**: `train.py`でモデル学習（Early Stopping実装）
+2. **学習**: 
+   - **推奨**: Google Colabで学習（無料GPU、詳細は`segmentation/COLAB_TRAINING_GUIDE.md`）
+   - または: ローカルで`train.py`（CPUモード、遅い）
 3. **推論**: `inference.py`で検出実行（CSV + 動画出力）
+
+**⚠️ GPU互換性の注意:**
+- RTX 5070 Ti (sm_120) は現在のPyTorchで未対応
+- **Google Colabでのトレーニングを推奨**（無料GPU使用可能）
+- 詳細: `segmentation/COLAB_TRAINING_GUIDE.md`
 
 **詳細:**
 ```powershell
@@ -89,7 +96,16 @@ python labeling_gui.py
 # → data/images/ と data/labels/ を指定
 # → ショートカット: N=次へ, P=前へ, S=保存, C=クリア, D=描画, E=消しゴム
 
-# 2. 学習
+# 2. 学習（2つの方法）
+
+# 方法A: Google Colabで学習（推奨・GPU使用）
+python create_data_zip.py  # データをZIP圧縮
+# → train_colab.ipynb をGoogle Colabにアップロード
+# → GPUランタイムで実行
+# → best_unet.pth をダウンロードして models/ に配置
+# 詳細: COLAB_TRAINING_GUIDE.md
+
+# 方法B: ローカルで学習（CPUモード・遅い）
 python train.py
 # → models/best_unet.pth に保存
 # → outputs/training_history.png で学習曲線を確認

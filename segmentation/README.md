@@ -6,6 +6,24 @@ U-Netベースのディープラーニングによる高精度プラナリア検
 
 ---
 
+## ⚠️ 重要: GPU互換性について（RTX 5070 Ti使用者向け）
+
+RTX 5070 Ti (CUDA Compute Capability sm_120) は、現在のPyTorch 2.6/2.7では**未対応**です。
+
+### 解決策: 2つの選択肢
+
+#### ✅ オプション1: Google Colabで学習（推奨）
+- **無料でGPU使用可能**（T4、V100など）
+- **互換性問題なし**
+- **詳細は `COLAB_TRAINING_GUIDE.md` を参照**
+
+#### ⚠️ オプション2: ローカルでCPUモード
+- 現在の設定では**CPUモード**で動作（遅いが動作します）
+- PyTorch 2.8以降でsm_120サポート追加予定
+- 詳細は `../install_pytorch_gpu.md` を参照
+
+---
+
 ## クイックスタート
 
 ### 1. ラベリング（100枚以上推奨）
@@ -16,11 +34,33 @@ python labeling_gui.py
 - ショートカット: N=次へ, P=前へ, S=保存, C=クリア, D=描画, E=消しゴム
 
 ### 2. 学習
+
+#### 🌟 方法A: Google Colabで学習（推奨・GPU使用）
+
+**オプションA-1: 1セル実行版（最も簡単）**
+1. データをZIP圧縮: `python create_data_zip.py`
+2. Google Colabで新規ノートブックを作成
+3. `train_colab_single.py` の内容を1つのセルにコピー&ペースト
+4. セルを実行（ZIPをアップロード）
+5. 学習済みモデルをダウンロード
+**詳細: `COLAB_SINGLE_CELL_GUIDE.md`**
+
+**オプションA-2: ノートブック版**
+1. データをZIP圧縮: `python create_data_zip.py`
+2. `train_colab.ipynb` をGoogle Colabで開く
+3. GPUランタイムを選択
+4. すべてのセルを実行
+5. 学習済みモデルをダウンロード
+**詳細: `COLAB_TRAINING_GUIDE.md`**
+
+#### 方法B: ローカルで学習（CPUモード）
+
 ```powershell
 python train.py
 ```
 - `models/best_unet.pth` に保存
 - `outputs/training_history.png` で学習曲線を確認
+- **注意**: CPUモードは非常に遅い（GPU比で10-50倍）
 
 ### 3. 推論
 ```powershell

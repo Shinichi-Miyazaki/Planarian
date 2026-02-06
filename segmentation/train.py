@@ -9,7 +9,6 @@ import os
 import torch
 import torch.optim as optim
 from tqdm import tqdm
-import numpy as np
 
 import config
 from utils import create_dirs_if_not_exist, plot_training_history, dice_coefficient, timestamp
@@ -130,12 +129,29 @@ def train(images_dir=None, labels_dir=None):
     if labels_dir is None:
         labels_dir = config.LABELS_DIR
 
-    # デバイス確認
-    device = torch.device(config.DEVICE if torch.cuda.is_available() else 'cpu')
-    print(f"デバイス: {device}")
-    if device.type == 'cuda':
-        print(f"GPU: {torch.cuda.get_device_name(0)}")
-        print(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB\n")
+    # デバイス確認（CUDA互換性テスト付き）
+    device_name = config.DEVICE
+
+    # CUDAが要求され、かつ利用可能な場合、互換性をテスト
+    if device_name == 'cuda' and torch.cuda.is_available():
+        try:
+            # 簡単なテンソル操作でCUDA互換性を確認
+            test_tensor = torch.zeros(1).cuda()
+            test_tensor += 1
+            device = torch.device('cuda')
+            print(f"デバイス: cuda")
+            print(f"GPU: {torch.cuda.get_device_name(0)}")
+            print(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+        except RuntimeError as e:
+            print(f"⚠️ CUDA互換性エラー: {str(e)[:100]}...")
+            print(f"⚠️ RTX 5070 Ti (sm_120) は現在のPyTorchバージョンで未対応です")
+            print(f"⚠️ CPUモードで実行します")
+            device = torch.device('cpu')
+    else:
+        device = torch.device('cpu')
+        print(f"デバイス: cpu")
+
+    print()  # 空行
 
     # データローダー作成
     print(f"[{timestamp()}] データローダー作成中...")
