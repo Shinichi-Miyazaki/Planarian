@@ -791,6 +791,14 @@ python run_inference_analysis.py \
 
 ## 🔖 バージョン履歴
 
+### v2.1.0 (2026-02-07)
+- ✅ ONNX Runtime推論エンジンを実装
+- ✅ RTX 5070 TiでGPU推論が可能に（DirectML）
+- ✅ モデル変換スクリプト（`export_onnx.py`）を追加
+- ✅ ONNX推論エンジン（`inference_onnx.py`）を追加
+- ✅ ONNX Runtime使用ガイドを追加
+- ✅ CPU推論も最適化（1.5-2倍高速化）
+
 ### v2.0.0 (2026-02-07)
 - ✅ albumentations依存を削除（推論時）
 - ✅ モデル読み込みのキー名互換性を改善

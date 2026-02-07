@@ -1,3 +1,4 @@
+# 基本パッケージ
 opencv-python>=4.5.0
 numpy>=1.21.0
 pandas>=1.3.0
@@ -5,10 +6,12 @@ matplotlib>=3.5.0
 Pillow>=8.3.0
 scipy>=1.7.0
 
-# ディープラーニング用（セグメンテーション）
+# セグメンテーション
 torch>=2.0.0
 torchvision>=0.15.0
 segmentation-models-pytorch>=0.3.0
-# albumentations>=1.3.0  # 推論では不要、学習時のみ必要（Colabで学習推奨）
 tqdm>=4.65.0
+
+# ONNX Runtime（GPU推論用・オプション）
+# pip install onnx onnxruntime-directml
 
