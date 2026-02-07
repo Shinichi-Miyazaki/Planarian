@@ -178,16 +178,21 @@ class InferenceAnalysisGUI:
             from datetime import datetime
             measurement_date = datetime.strptime(self.measurement_date.get(), '%Y-%m-%d').date()
 
-            run_inference_and_analysis(
-                images_dir=self.images_dir.get(),
-                output_dir=self.output_dir.get(),
-                model_path=self.model_path.get(),
-                create_video=self.create_video.get(),
-                time_interval_minutes=self.time_interval.get(),
-                day_start_time=self.day_start.get(),
-                night_start_time=self.night_start.get(),
-                measurement_start_time=self.measurement_start.get(),
-                measurement_date=measurement_date)
+            if self.use_onnx.get():
+                # ONNX Runtime推論
+                self._run_onnx_inference_and_analysis(measurement_date)
+            else:
+                # PyTorch推論
+                run_inference_and_analysis(
+                    images_dir=self.images_dir.get(),
+                    output_dir=self.output_dir.get(),
+                    model_path=self.model_path.get(),
+                    create_video=self.create_video.get(),
+                    time_interval_minutes=self.time_interval.get(),
+                    day_start_time=self.day_start.get(),
+                    night_start_time=self.night_start.get(),
+                    measurement_start_time=self.measurement_start.get(),
+                    measurement_date=measurement_date)
 
             self.root.after(0, lambda: self._on_completion(True, "処理が完了しました"))
         except Exception as e:
@@ -195,6 +200,63 @@ class InferenceAnalysisGUI:
             error_msg = f"エラーが発生しました:\n\n{type(e).__name__}: {str(e)}\n\n詳細:\n{traceback.format_exc()}"
             print(error_msg)  # コンソールにも出力
             self.root.after(0, lambda: self._on_completion(False, error_msg))
+
+    def _run_onnx_inference_and_analysis(self, measurement_date):
+        """ONNX Runtime推論 + 行動解析"""
+        import json
+        from inference_onnx import inference_onnx
+        from behavior_analysis import BehaviorAnalyzer
+
+        images_dir = self.images_dir.get()
+        output_dir = self.output_dir.get()
+        model_path = self.model_path.get()
+
+        # 時間設定を保存
+        time_config = {
+            'day_start_time': self.day_start.get(),
+            'night_start_time': self.night_start.get(),
+            'measurement_start_time': self.measurement_start.get(),
+            'measurement_date': measurement_date.strftime('%Y-%m-%d')
+        }
+        config_path = os.path.join(output_dir, 'time_config.json')
+        with open(config_path, 'w') as f:
+            json.dump(time_config, f, indent=2)
+
+        # ONNX推論
+        print("ONNX Runtime推論を開始...")
+        device = self.onnx_device.get()
+        use_directml = (device == 'directml')
+
+        inference_onnx(
+            images_dir=images_dir,
+            output_dir=output_dir,
+            model_path=model_path,
+            create_video=self.create_video.get(),
+            device=device,
+            use_directml=use_directml
+        )
+
+        csv_path = os.path.join(output_dir, 'analysis_results.csv')
+
+        # 行動解析
+        print("行動解析を開始...")
+        analyzer = BehaviorAnalyzer(
+            csv_path=csv_path,
+            time_interval_minutes=self.time_interval.get(),
+            day_start_time=self.day_start.get(),
+            night_start_time=self.night_start.get(),
+            measurement_start_time=self.measurement_start.get(),
+            measurement_date=measurement_date
+        )
+
+        analyzer.load_data()
+        analyzer.calculate_movement()
+        analyzer.calculate_immobility_ratio()
+        analyzer.aggregate_by_time()
+        analyzer.apply_moving_average(window=1)
+        analyzer.create_plots(output_dir)
+        analyzer.save_detailed_csv(output_dir)
+        analyzer.generate_summary_report(output_dir)
 
     def _on_completion(self, success, message):
         self.progress.stop()
