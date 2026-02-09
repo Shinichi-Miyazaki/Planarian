@@ -11,8 +11,6 @@ import cv2
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
-import albumentations as A
-from albumentations.pytorch import ToTensorV2
 
 import config
 from utils import get_image_files, mask_to_contours, timestamp
@@ -20,7 +18,7 @@ from unet_model import load_model
 
 
 def preprocess_image(image):
-    """推論用の前処理"""
+    """推論用の前処理（albumentations不要版）"""
     # RGB変換
     if len(image.shape) == 2:
         image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
@@ -33,14 +31,23 @@ def preprocess_image(image):
     original_h, original_w = image.shape[:2]
     resized = cv2.resize(image, (config.IMAGE_WIDTH, config.IMAGE_HEIGHT))
 
-    # 正規化
-    transform = A.Compose([
-        A.Normalize(mean=config.IMAGENET_MEAN, std=config.IMAGENET_STD),
-        ToTensorV2()
-    ])
+    # 正規化（ImageNet統計を使用）
+    # uint8 -> float32, [0, 255] -> [0, 1]
+    image_float = resized.astype(np.float32) / 255.0
 
-    augmented = transform(image=resized)
-    tensor = augmented['image'].unsqueeze(0)  # バッチ次元追加
+    # チャンネルごとに正規化 (mean, std)
+    mean = np.array(config.IMAGENET_MEAN, dtype=np.float32)
+    std = np.array(config.IMAGENET_STD, dtype=np.float32)
+    normalized = (image_float - mean) / std
+
+    # (H, W, C) -> (C, H, W)
+    transposed = normalized.transpose(2, 0, 1)
+
+    # numpy -> torch tensor
+    tensor = torch.from_numpy(transposed).float()
+
+    # バッチ次元追加
+    tensor = tensor.unsqueeze(0)
 
     return tensor, (original_h, original_w)
 
@@ -86,9 +93,9 @@ def inference(images_dir, output_dir, model_path=None, create_video=True):
     # 出力ディレクトリ作成
     os.makedirs(output_dir, exist_ok=True)
 
-    # デバイス
-    device = torch.device(config.DEVICE if torch.cuda.is_available() else 'cpu')
-    print(f"デバイス: {device}")
+    # デバイス（CPU固定）
+    device = torch.device('cpu')
+    print(f"デバイス: cpu（推論モード）")
 
     # モデル読み込み
     print(f"[{timestamp()}] モデル読み込み中...")

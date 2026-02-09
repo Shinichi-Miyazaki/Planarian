@@ -1,107 +1,158 @@
-# セマンティックセグメンテーション - Deep Learning手法
+# セグメンテーションガイド
 
-U-Netベースのディープラーニングによる高精度プラナリア検出システム
-
-**詳細は親ディレクトリの `README.md` を参照してください。**
+U-Netによる高精度プラナリア検出システムの使い方
 
 ---
 
-## ⚠️ 重要: GPU互換性について（RTX 5070 Ti使用者向け）
+## 📝 3ステップで使える
 
-RTX 5070 Ti (CUDA Compute Capability sm_120) は、現在のPyTorch 2.6/2.7では**未対応**です。
+### 1. ラベリング（学習データ作成）
 
-### 解決策: 2つの選択肢
-
-#### ✅ オプション1: Google Colabで学習（推奨）
-- **無料でGPU使用可能**（T4、V100など）
-- **互換性問題なし**
-- **詳細は `COLAB_TRAINING_GUIDE.md` を参照**
-
-#### ⚠️ オプション2: ローカルでCPUモード
-- 現在の設定では**CPUモード**で動作（遅いが動作します）
-- PyTorch 2.8以降でsm_120サポート追加予定
-- 詳細は `../install_pytorch_gpu.md` を参照
-
----
-
-## クイックスタート
-
-### 1. ラベリング（100枚以上推奨）
 ```powershell
 python labeling_gui.py
 ```
-- `data/images/` と `data/labels/` を選択
-- ショートカット: N=次へ, P=前へ, S=保存, C=クリア, D=描画, E=消しゴム
 
-### 2. 学習
-
-#### 🌟 方法A: Google Colabで学習（推奨・GPU使用）
-
-**オプションA-1: 1セル実行版（最も簡単）**
-1. データをZIP圧縮: `python create_data_zip.py`
-2. Google Colabで新規ノートブックを作成
-3. `train_colab_single.py` の内容を1つのセルにコピー&ペースト
-4. セルを実行（ZIPをアップロード）
-5. 学習済みモデルをダウンロード
-**詳細: `COLAB_SINGLE_CELL_GUIDE.md`**
-
-**オプションA-2: ノートブック版**
-1. データをZIP圧縮: `python create_data_zip.py`
-2. `train_colab.ipynb` をGoogle Colabで開く
-3. GPUランタイムを選択
-4. すべてのセルを実行
-5. 学習済みモデルをダウンロード
-**詳細: `COLAB_TRAINING_GUIDE.md`**
-
-#### 方法B: ローカルで学習（CPUモード）
-
-```powershell
-python train.py
-```
-- `models/best_unet.pth` に保存
-- `outputs/training_history.png` で学習曲線を確認
-- **注意**: CPUモードは非常に遅い（GPU比で10-50倍）
-
-### 3. 推論
-```powershell
-python inference.py --images <入力> --output <出力>
-```
-- `outputs/analysis_results.csv`（behavior_analysis.py互換）
-- `outputs/segmentation_video.avi`（動画）
+- 画像フォルダと保存先を選択
+- マウスでプラナリアをなぞる
+- `S`キーで保存、`N`キーで次へ
+- **100枚以上推奨**
 
 ---
 
-## 設定ファイル
+### 2. モデル学習
 
-`config.py` でパラメータを調整：
-- モデル設定（画像サイズ、エンコーダー）
-- 学習設定（バッチサイズ、学習率、エポック数）
-- 推論設定（信頼度閾値、面積フィルタ）
+#### Google Colab（推奨・無料GPU）
+
+```powershell
+# 1. データをZIP化
+python legacy\create_data_zip.py
+
+# 2. Google Colabで開く
+# → legacy/train_colab.ipynb
+# → GPUランタイムを選択して実行
+
+# 3. best_unet.pth をダウンロード
+# → models/ に配置
+```
+
+詳細: `docs/COLAB_TRAINING_GUIDE.md`
+
+#### ローカル学習（CPU・遅い）
+
+```powershell
+python legacy\train.py
+```
 
 ---
 
-## ファイル構成
+### 3. 推論+解析（メイン機能）
+
+```powershell
+# GUI版（推奨）
+python inference_analysis_gui.py
+
+# コマンドライン版
+python run_inference_analysis.py --images <画像フォルダ> --output <出力フォルダ>
+```
+
+
+**出力:**
+- セグメンテーション結果CSV
+- 行動解析データ（移動量・不動性）
+- 時系列グラフ、統計レポート
+- 動画（オプション）
+
+---
+
+## 🎮 ONNX Runtime（GPU推論・RTX 5070 Ti対応）
+
+PyTorchが未対応のGPUでも高速推論が可能。
+
+### 使い方
+
+```powershell
+# 1. パッケージインストール
+pip install onnx onnxruntime-directml
+
+# 2. モデル変換
+python export_onnx.py --model models\best_unet.pth
+
+# 3. GPU推論
+python inference_onnx.py --images <画像フォルダ> --output <出力フォルダ> --directml
+```
+
+**効果:** CPU比で10-30倍高速化
+
+詳細: `ONNX_RUNTIME_GUIDE.md`
+
+---
+
+## ⚙️ 設定
+
+### config.py
+
+```python
+# 画像サイズ
+IMAGE_HEIGHT = 512
+IMAGE_WIDTH = 512
+
+# 推論設定
+CONFIDENCE_THRESHOLD = 0.5
+MIN_CONTOUR_AREA = 100
+MAX_CONTOUR_AREA = 50000
+
+# デバイス
+DEVICE = 'cpu'  # PyTorch使用時
+```
+
+---
+
+## 🛠️ トラブルシューティング
+
+### モデルファイルが無い
+
+**解決:** Google Colabで学習して`models/best_unet.pth`に配置
+
+### albumentationsエラー
+
+**解決:** 推論では不要。無視してOK
+
+### GPU使えない
+
+**解決:** ONNX Runtime + DirectMLを使用（上記参照）
+
+---
+
+## 📁 ファイル構成
 
 ```
 segmentation/
-├── config.py          # 設定ファイル（すべてのパラメータ）
-├── dataset.py         # データローダー
-├── unet_model.py      # U-Netモデル定義
-├── train.py           # 学習スクリプト
-├── inference.py       # 推論スクリプト
-├── labeling_gui.py    # ラベリングツール
-├── utils.py           # ユーティリティ関数
+├── labeling_gui.py            # ★ ラベリング
+├── inference_analysis_gui.py  # ★ 推論+解析GUI
+├── export_onnx.py             # ★ モデル変換
+├── inference_onnx.py          # ★ ONNX推論（GPU対応）
+├── inference.py               # PyTorch推論
+├── run_inference_analysis.py  # CLI版
+├── unet_model.py
+├── config.py
+├── utils.py
 ├── data/
-│   ├── images/        # 元画像
-│   └── labels/        # ラベル（マスク）
+│   ├── images/
+│   └── labels/
 ├── models/
-│   └── best_unet.pth  # ベストモデル
-└── outputs/
-    ├── analysis_results.csv
-    ├── training_history.png
-    └── segmentation_video.avi
+│   └── best_unet.pth          # 学習済みモデル
+└── legacy/
+    ├── train.py               # ローカル学習
+    ├── train_colab.ipynb      # Colab学習
+    └── create_data_zip.py
 ```
+
+**★ = よく使うファイル**
 
 ---
 
-**詳細なドキュメントは親ディレクトリの `README.md` を参照してください。**
+## 📚 詳細ドキュメント
+
+- **Colab学習**: `docs/COLAB_TRAINING_GUIDE.md`
+- **ONNX Runtime**: `ONNX_RUNTIME_GUIDE.md`
+- **パス設定**: `docs/PATH_CONFIGURATION_GUIDE.md`

@@ -34,19 +34,22 @@ class BehaviorAnalyzer:
         """
         self.csv_path = csv_path
         self.time_interval = time_interval_minutes
-        self.day_start_time = day_start_time
-        self.night_start_time = night_start_time
+
+        # 24:00を00:00に変換（無効な時刻を修正）
+        self.day_start_time = day_start_time.replace('24:00', '00:00')
+        self.night_start_time = night_start_time.replace('24:00', '00:00')
+
         self.measurement_start_time = measurement_start_time
         self.measurement_date = measurement_date
         self.df = None
         self.processed_df = None
 
         # Constant darkness条件の判定
-        self.is_constant_darkness = (day_start_time == night_start_time)
+        self.is_constant_darkness = (self.day_start_time == self.night_start_time)
         if self.is_constant_darkness:
             print("Constant darkness condition detected")
         else:
-            print(f"Light-dark cycle condition: Day {day_start_time} - {night_start_time}")
+            print(f"Light-dark cycle condition: Day {self.day_start_time} - {self.night_start_time}")
 
     def _generate_timestamps(self):
         """
@@ -221,9 +224,14 @@ class BehaviorAnalyzer:
 
     def _is_daytime(self, dt):
         """指定された時刻が昼間かどうかを判定"""
-        day_start = datetime.strptime(self.day_start_time, '%H:%M').time()
-        night_start = datetime.strptime(self.night_start_time, '%H:%M').time()
+        # 24:00を00:00に変換
+        day_start_str = self.day_start_time.replace('24:00', '00:00')
+        night_start_str = self.night_start_time.replace('24:00', '00:00')
+
+        day_start = datetime.strptime(day_start_str, '%H:%M').time()
+        night_start = datetime.strptime(night_start_str, '%H:%M').time()
         current_time = dt.time()
+
         if day_start < night_start:  # 通常のケース (例: 7:00-19:00が昼)
             return day_start <= current_time < night_start
         else:  # 日をまたぐケース (例: 19:00-7:00が夜)
@@ -339,8 +347,13 @@ class BehaviorAnalyzer:
         if self.processed_df is None or len(self.processed_df) == 0 or self.is_constant_darkness:
             return
         try:
-            day_start = datetime.strptime(self.day_start_time, '%H:%M').time()
-            night_start = datetime.strptime(self.night_start_time, '%H:%M').time()
+            # 24:00を00:00に変換
+            day_start_str = self.day_start_time.replace('24:00', '00:00')
+            night_start_str = self.night_start_time.replace('24:00', '00:00')
+
+            day_start = datetime.strptime(day_start_str, '%H:%M').time()
+            night_start = datetime.strptime(night_start_str, '%H:%M').time()
+
             # NaTを除外してから日付を取得
             valid_dates = self.processed_df.dropna(subset=['datetime'])
             if len(valid_dates) == 0:
