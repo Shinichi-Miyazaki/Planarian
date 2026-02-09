@@ -47,11 +47,29 @@ python legacy\train.py
 
 ### 3. 推論+解析（メイン機能）
 
-```powershell
-# GUI版（推奨）
-python inference_analysis_gui.py
+#### GUI版（推奨）
 
-# コマンドライン版
+```powershell
+python inference_analysis_gui.py
+```
+
+**2つのモード:**
+
+1. **単一フォルダ解析**: 1つのフォルダを指定して解析
+2. **バッチフォルダ解析**: 親フォルダ配下を走査して複数フォルダを一括解析
+
+**バッチモードの使い方:**
+1. 「バッチフォルダ解析」タブを選択
+2. 親フォルダを選択（画像フォルダを含む上位フォルダ）
+3. 画像数閾値を設定（デフォルト: 1000枚以上）
+4. 「フォルダを検索」をクリック
+5. 検出されたフォルダごとに測定日時を編集（ダブルクリック）
+6. 「バッチ実行」で一括解析開始
+7. 各フォルダ内に`segmentation_analysis`フォルダが作成され、結果が保存される
+
+#### コマンドライン版
+
+```powershell
 python run_inference_analysis.py --images <画像フォルダ> --output <出力フォルダ>
 ```
 
@@ -123,12 +141,31 @@ DEVICE = 'cpu'  # PyTorch使用時
 
 ---
 
+## 📚 詳細ドキュメント
+
+### 基本機能
+- **このREADME**: 基本的な使い方（ラベリング・学習・推論）
+
+### 高度な機能
+- **[バッチフォルダ解析ガイド](docs/BATCH_ANALYSIS_GUIDE.md)**: 複数フォルダの一括解析方法
+- **[ONNX Runtime GPU推論ガイド](ONNX_RUNTIME_GUIDE.md)**: GPU高速化の方法
+
+### 学習関連
+- **[Google Colab学習ガイド](docs/COLAB_TRAINING_GUIDE.md)**: 無料GPUでモデル学習
+- **[Google Colab単一セル版](docs/COLAB_SINGLE_CELL_GUIDE.md)**: 1セルで完結する学習
+
+### トラブルシューティング
+- **[GPU互換性問題](../docs/GPU_COMPATIBILITY_ISSUE.md)**: RTX 5070 Ti等の新GPU対応
+- **[PyTorch GPUインストール](../docs/install_pytorch_gpu.md)**: GPU版PyTorchの導入
+
+---
+
 ## 📁 ファイル構成
 
 ```
 segmentation/
 ├── labeling_gui.py            # ★ ラベリング
-├── inference_analysis_gui.py  # ★ 推論+解析GUI
+├── inference_analysis_gui.py  # ★ 推論+解析GUI（バッチ対応）
 ├── export_onnx.py             # ★ モデル変換
 ├── inference_onnx.py          # ★ ONNX推論（GPU対応）
 ├── inference.py               # PyTorch推論
@@ -139,6 +176,17 @@ segmentation/
 ├── data/
 │   ├── images/
 │   └── labels/
+├── docs/
+│   ├── BATCH_ANALYSIS_GUIDE.md       # バッチ解析ガイド（NEW）
+│   ├── IMPLEMENTATION_SUMMARY.md     # 実装サマリー（NEW）
+│   ├── COLAB_TRAINING_GUIDE.md
+│   └── ...
+├── legacy/
+│   ├── train.py
+│   └── ...
+└── models/
+    └── best_unet.pth          # 学習済みモデル
+```
 ├── models/
 │   └── best_unet.pth          # 学習済みモデル
 └── legacy/

@@ -5,6 +5,8 @@ pandas>=1.3.0
 matplotlib>=3.5.0
 Pillow>=8.3.0
 scipy>=1.7.0
+seaborn>=0.11.0
+openpyxl>=3.0.0
 
 # セグメンテーション
 torch>=2.0.0

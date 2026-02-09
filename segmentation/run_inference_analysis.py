@@ -152,6 +152,15 @@ def run_inference_and_analysis(
         print(f"  - セグメンテーション動画: segmentation_video.avi")
     print()
 
+    # 解析結果のパス情報を返す
+    return {
+        'output_dir': output_dir,
+        'aggregated_csv': os.path.join(output_dir, 'aggregated_immobility_analysis.csv'),
+        'detailed_csv': os.path.join(output_dir, 'detailed_immobility_analysis.csv'),
+        'summary_csv': os.path.join(output_dir, 'day_night_summary.csv'),
+        'time_interval': time_interval_minutes
+    }
+
 
 def main():
     parser = argparse.ArgumentParser(
