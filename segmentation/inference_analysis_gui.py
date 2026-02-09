@@ -28,17 +28,21 @@ class InferenceAnalysisGUI:
         self.images_dir = tk.StringVar()
         self.output_dir = tk.StringVar()
         self.model_path = tk.StringVar(value=config.BEST_MODEL_PATH)
-        self.day_start = tk.StringVar(value='07:00')
-        self.night_start = tk.StringVar(value='19:00')
+        self.day_start = tk.StringVar(value='12:00')
+        self.night_start = tk.StringVar(value='23:00')
         self.measurement_start = tk.StringVar(value='09:00:00')
         self.measurement_date = tk.StringVar(value=date.today().strftime('%Y-%m-%d'))
         self.time_interval = tk.IntVar(value=10)
         self.create_video = tk.BooleanVar(value=False)
+        self.use_onnx = tk.BooleanVar(value=False)
+        self.inference_device = tk.StringVar(value='cpu')
 
         # バッチモード用の変数
         self.parent_dir = tk.StringVar()
         self.excel_file = tk.StringVar()
         self.image_threshold = tk.IntVar(value=1000)
+        self.batch_use_onnx = tk.BooleanVar(value=False)
+        self.batch_inference_device = tk.StringVar(value='cpu')
         self.detected_folders = []  # [(folder_path, image_count, measurement_date, measurement_start_time), ...]
 
         self.create_widgets()
@@ -119,6 +123,29 @@ class InferenceAnalysisGUI:
         ttk.Separator(parent, orient='horizontal').grid(row=row, column=0, columnspan=3, sticky='ew', pady=10)
         row += 1
 
+        # ONNX / GPU設定を1行に
+        ttk.Label(parent, text="推論設定", font=('Arial', 11, 'bold')).grid(
+            row=row, column=0, columnspan=3, sticky=tk.W, pady=5)
+        row += 1
+
+        inference_frame = ttk.Frame(parent)
+        inference_frame.grid(row=row, column=0, columnspan=3, sticky='ew', pady=3)
+
+        ttk.Checkbutton(inference_frame, text="ONNX Runtime (GPU対応)",
+                       variable=self.use_onnx).pack(side=tk.LEFT, padx=(0, 10))
+
+        ttk.Label(inference_frame, text="デバイス:").pack(side=tk.LEFT, padx=(10, 5))
+        ttk.Radiobutton(inference_frame, text="CPU", variable=self.inference_device, value='cpu').pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(inference_frame, text="CUDA (NVIDIA GPU)", variable=self.inference_device, value='cuda').pack(side=tk.LEFT, padx=5)
+        row += 1
+
+        ttk.Label(parent, text="※ ONNX使用時: .pthモデルは自動的に.onnxに変換 | RTX 5070 TiはCUDA推奨",
+                 font=('Arial', 8), foreground='gray').grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=(0, 5))
+        row += 1
+
+        ttk.Separator(parent, orient='horizontal').grid(row=row, column=0, columnspan=3, sticky='ew', pady=10)
+        row += 1
+
         self.run_button = ttk.Button(parent, text="実行", command=self.run_single_analysis)
         self.run_button.grid(row=row, column=0, columnspan=3, pady=10)
         row += 1
@@ -135,85 +162,104 @@ class InferenceAnalysisGUI:
         row = 0
 
         ttk.Label(parent, text="バッチフォルダ解析",
-                 font=('Arial', 14, 'bold')).grid(row=row, column=0, columnspan=3, pady=10)
+                 font=('Arial', 14, 'bold')).grid(row=row, column=0, columnspan=6, pady=10)
         row += 1
 
         ttk.Separator(parent, orient='horizontal').grid(
-            row=row, column=0, columnspan=3, sticky='ew', pady=5)
+            row=row, column=0, columnspan=6, sticky='ew', pady=5)
         row += 1
 
-        # 親フォルダ選択
+        # 親フォルダとExcelファイルを同じ行に
         ttk.Label(parent, text="親フォルダ:").grid(row=row, column=0, sticky=tk.W, pady=5)
-        ttk.Entry(parent, textvariable=self.parent_dir, width=50).grid(row=row, column=1, pady=5)
+        ttk.Entry(parent, textvariable=self.parent_dir, width=30).grid(row=row, column=1, pady=5, sticky='ew')
         ttk.Button(parent, text="参照", command=self.browse_parent_dir).grid(row=row, column=2, padx=5, pady=5)
+
+        ttk.Label(parent, text="Excel:").grid(row=row, column=3, sticky=tk.W, pady=5, padx=(10,0))
+        ttk.Entry(parent, textvariable=self.excel_file, width=30).grid(row=row, column=4, pady=5, sticky='ew')
+        ttk.Button(parent, text="参照", command=self.browse_excel_file).grid(row=row, column=5, padx=5, pady=5)
         row += 1
 
-        # Excelファイル選択
-        ttk.Label(parent, text="Excelファイル (オプション):").grid(row=row, column=0, sticky=tk.W, pady=5)
-        ttk.Entry(parent, textvariable=self.excel_file, width=50).grid(row=row, column=1, pady=5)
-        ttk.Button(parent, text="参照", command=self.browse_excel_file).grid(row=row, column=2, padx=5, pady=5)
+        ttk.Label(parent, text="※ Excel: dir_name, start_date, start_time列が必要",
+                 font=('Arial', 8), foreground='gray').grid(row=row, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
         row += 1
 
-        ttk.Label(parent, text="※ Excelファイル指定時: dir_name, start_date, start_time列が必要",
-                 font=('Arial', 8), foreground='gray').grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=(0, 5))
-        row += 1
+        # 画像数閾値とモデルを同じ行に
+        ttk.Label(parent, text="画像数閾値:").grid(row=row, column=0, sticky=tk.W, pady=5)
+        ttk.Entry(parent, textvariable=self.image_threshold, width=10).grid(row=row, column=1, sticky=tk.W, pady=5)
 
-        # 画像数閾値
-        ttk.Label(parent, text="画像数閾値 (最小):").grid(row=row, column=0, sticky=tk.W, pady=5)
-        ttk.Entry(parent, textvariable=self.image_threshold, width=20).grid(row=row, column=1, sticky=tk.W, pady=5)
-        row += 1
-
-        # モデル選択
-        ttk.Label(parent, text="モデル:").grid(row=row, column=0, sticky=tk.W, pady=5)
-        ttk.Entry(parent, textvariable=self.model_path, width=50).grid(row=row, column=1, pady=5)
-        ttk.Button(parent, text="参照", command=self.browse_model).grid(row=row, column=2, padx=5, pady=5)
+        ttk.Label(parent, text="モデル:").grid(row=row, column=2, sticky=tk.W, pady=5, padx=(10,0))
+        ttk.Entry(parent, textvariable=self.model_path, width=30).grid(row=row, column=3, columnspan=2, pady=5, sticky='ew')
+        ttk.Button(parent, text="参照", command=self.browse_model).grid(row=row, column=5, padx=5, pady=5)
         row += 1
 
         # フォルダ検索ボタン
         ttk.Button(parent, text="フォルダを検索", command=self.search_folders).grid(
-            row=row, column=0, columnspan=3, pady=10)
+            row=row, column=0, columnspan=6, pady=10)
         row += 1
 
         ttk.Separator(parent, orient='horizontal').grid(
-            row=row, column=0, columnspan=3, sticky='ew', pady=5)
+            row=row, column=0, columnspan=6, sticky='ew', pady=5)
         row += 1
 
-        # 共通時間設定
-        ttk.Label(parent, text="共通時間設定", font=('Arial', 11, 'bold')).grid(
-            row=row, column=0, columnspan=3, sticky=tk.W, pady=5)
+        # 共通時間設定を1行に
+        ttk.Label(parent, text="時間設定", font=('Arial', 11, 'bold')).grid(
+            row=row, column=0, columnspan=6, sticky=tk.W, pady=5)
         row += 1
 
         time_frame = ttk.Frame(parent)
-        time_frame.grid(row=row, column=0, columnspan=3, sticky='ew', pady=5)
+        time_frame.grid(row=row, column=0, columnspan=6, sticky='ew', pady=5)
 
-        ttk.Label(time_frame, text="昼開始:").grid(row=0, column=0, sticky=tk.W, padx=5)
-        ttk.Entry(time_frame, textvariable=self.day_start, width=10).grid(row=0, column=1, padx=5)
+        ttk.Label(time_frame, text="昼開始:").pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Entry(time_frame, textvariable=self.day_start, width=8).pack(side=tk.LEFT, padx=5)
 
-        ttk.Label(time_frame, text="夜開始:").grid(row=0, column=2, sticky=tk.W, padx=5)
-        ttk.Entry(time_frame, textvariable=self.night_start, width=10).grid(row=0, column=3, padx=5)
+        ttk.Label(time_frame, text="夜開始:").pack(side=tk.LEFT, padx=(10, 5))
+        ttk.Entry(time_frame, textvariable=self.night_start, width=8).pack(side=tk.LEFT, padx=5)
 
-        ttk.Label(time_frame, text="間隔（分）:").grid(row=0, column=4, sticky=tk.W, padx=5)
-        ttk.Entry(time_frame, textvariable=self.time_interval, width=10).grid(row=0, column=5, padx=5)
-        row += 1
+        ttk.Label(time_frame, text="間隔（分）:").pack(side=tk.LEFT, padx=(10, 5))
+        ttk.Entry(time_frame, textvariable=self.time_interval, width=8).pack(side=tk.LEFT, padx=5)
 
-        ttk.Checkbutton(parent, text="動画を作成", variable=self.create_video).grid(
-            row=row, column=0, columnspan=3, sticky=tk.W, pady=5)
+        ttk.Checkbutton(time_frame, text="動画を作成", variable=self.create_video).pack(side=tk.LEFT, padx=(20, 5))
         row += 1
 
         ttk.Separator(parent, orient='horizontal').grid(
-            row=row, column=0, columnspan=3, sticky='ew', pady=5)
+            row=row, column=0, columnspan=6, sticky='ew', pady=5)
+        row += 1
+
+        # ONNX / GPU設定を1行に
+        ttk.Label(parent, text="推論設定", font=('Arial', 11, 'bold')).grid(
+            row=row, column=0, columnspan=6, sticky=tk.W, pady=5)
+        row += 1
+
+        inference_frame = ttk.Frame(parent)
+        inference_frame.grid(row=row, column=0, columnspan=6, sticky='ew', pady=5)
+
+        ttk.Checkbutton(inference_frame, text="ONNX Runtime (GPU対応)",
+                       variable=self.batch_use_onnx).pack(side=tk.LEFT, padx=(0, 10))
+
+        ttk.Label(inference_frame, text="デバイス:").pack(side=tk.LEFT, padx=(10, 5))
+        ttk.Radiobutton(inference_frame, text="CPU", variable=self.batch_inference_device, value='cpu').pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(inference_frame, text="CUDA (NVIDIA GPU)", variable=self.batch_inference_device, value='cuda').pack(side=tk.LEFT, padx=5)
+        row += 1
+
+        ttk.Label(parent, text="※ RTX 5070 TiはCUDAを推奨",
+                 font=('Arial', 8), foreground='orange').grid(row=row, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
+        row += 1
+
+        ttk.Separator(parent, orient='horizontal').grid(
+            row=row, column=0, columnspan=6, sticky='ew', pady=5)
         row += 1
 
         # 検出されたフォルダリスト
         ttk.Label(parent, text="検出されたフォルダ", font=('Arial', 11, 'bold')).grid(
-            row=row, column=0, columnspan=3, sticky=tk.W, pady=5)
+            row=row, column=0, columnspan=6, sticky=tk.W, pady=5)
         row += 1
 
         # Treeviewでフォルダリストを表示
         tree_frame = ttk.Frame(parent)
-        tree_frame.grid(row=row, column=0, columnspan=3, sticky='nsew', pady=5)
+        tree_frame.grid(row=row, column=0, columnspan=6, sticky='nsew', pady=5)
         parent.rowconfigure(row, weight=1)
         parent.columnconfigure(1, weight=1)
+        parent.columnconfigure(4, weight=1)
 
         # スクロールバー
         tree_scroll = ttk.Scrollbar(tree_frame)
@@ -246,28 +292,28 @@ class InferenceAnalysisGUI:
 
         # ボタンフレーム
         button_frame = ttk.Frame(parent)
-        button_frame.grid(row=row, column=0, columnspan=3, pady=10)
+        button_frame.grid(row=row, column=0, columnspan=6, pady=10)
 
         ttk.Button(button_frame, text="選択フォルダを削除", command=self.remove_selected_folder).pack(side=tk.LEFT, padx=5)
         ttk.Button(button_frame, text="全て削除", command=self.clear_all_folders).pack(side=tk.LEFT, padx=5)
         row += 1
 
         ttk.Separator(parent, orient='horizontal').grid(
-            row=row, column=0, columnspan=3, sticky='ew', pady=10)
+            row=row, column=0, columnspan=6, sticky='ew', pady=10)
         row += 1
 
         # バッチ実行ボタン
         self.batch_run_button = ttk.Button(parent, text="バッチ実行", command=self.run_batch_analysis)
-        self.batch_run_button.grid(row=row, column=0, columnspan=3, pady=10)
+        self.batch_run_button.grid(row=row, column=0, columnspan=6, pady=10)
         row += 1
 
         # ステータス
         self.batch_status_label = ttk.Label(parent, text="準備完了", foreground="green")
-        self.batch_status_label.grid(row=row, column=0, columnspan=3, pady=5)
+        self.batch_status_label.grid(row=row, column=0, columnspan=6, pady=5)
         row += 1
 
         self.batch_progress = ttk.Progressbar(parent, mode='determinate', length=400)
-        self.batch_progress.grid(row=row, column=0, columnspan=3, pady=5)
+        self.batch_progress.grid(row=row, column=0, columnspan=6, pady=5)
 
     def browse_images(self):
         directory = filedialog.askdirectory(title="画像フォルダを選択")
@@ -581,17 +627,21 @@ class InferenceAnalysisGUI:
         try:
             measurement_date = datetime.strptime(self.measurement_date.get(), '%Y-%m-%d').date()
 
-            # PyTorch推論
-            analysis_info = run_inference_and_analysis(
-                images_dir=self.images_dir.get(),
-                output_dir=self.output_dir.get(),
-                model_path=self.model_path.get(),
-                create_video=self.create_video.get(),
-                time_interval_minutes=self.time_interval.get(),
-                day_start_time=self.day_start.get(),
-                night_start_time=self.night_start.get(),
-                measurement_start_time=self.measurement_start.get(),
-                measurement_date=measurement_date)
+            if self.use_onnx.get():
+                # ONNX Runtime推論
+                self._run_onnx_inference_and_analysis(measurement_date)
+            else:
+                # PyTorch推論
+                analysis_info = run_inference_and_analysis(
+                    images_dir=self.images_dir.get(),
+                    output_dir=self.output_dir.get(),
+                    model_path=self.model_path.get(),
+                    create_video=self.create_video.get(),
+                    time_interval_minutes=self.time_interval.get(),
+                    day_start_time=self.day_start.get(),
+                    night_start_time=self.night_start.get(),
+                    measurement_start_time=self.measurement_start.get(),
+                    measurement_date=measurement_date)
 
             self.root.after(0, lambda: self._on_single_completion(True, "処理が完了しました"))
         except Exception as e:
@@ -599,6 +649,73 @@ class InferenceAnalysisGUI:
             error_msg = f"エラーが発生しました:\n\n{type(e).__name__}: {str(e)}\n\n詳細:\n{traceback.format_exc()}"
             print(error_msg)
             self.root.after(0, lambda: self._on_single_completion(False, error_msg))
+
+    def _run_onnx_inference_and_analysis(self, measurement_date):
+        """ONNX Runtime推論 + 行動解析"""
+        import json
+        from inference_onnx import inference_onnx
+        from behavior_analysis import BehaviorAnalyzer
+
+        images_dir = self.images_dir.get()
+        output_dir = self.output_dir.get()
+        model_path = self.model_path.get()
+        device = self.inference_device.get()
+
+        # 時間設定を保存
+        time_config = {
+            'day_start_time': self.day_start.get(),
+            'night_start_time': self.night_start.get(),
+            'measurement_start_time': self.measurement_start.get(),
+            'measurement_date': measurement_date.strftime('%Y-%m-%d')
+        }
+        config_path = os.path.join(output_dir, 'time_config.json')
+        os.makedirs(output_dir, exist_ok=True)
+        with open(config_path, 'w') as f:
+            json.dump(time_config, f, indent=2)
+
+        # .pthモデルを.onnxに変換（必要な場合）
+        if model_path.endswith('.pth'):
+            onnx_model_path = model_path.replace('.pth', '.onnx')
+            if not os.path.exists(onnx_model_path):
+                print(f"ONNXモデルが見つかりません。変換中: {model_path} -> {onnx_model_path}")
+                from export_onnx import export_to_onnx
+                export_to_onnx(model_path, onnx_model_path)
+            model_path = onnx_model_path
+
+        # ONNX推論
+        print(f"ONNX Runtime推論を開始... (device: {device})")
+        use_directml = (device == 'directml')
+
+        inference_onnx(
+            images_dir=images_dir,
+            output_dir=output_dir,
+            model_path=model_path,
+            create_video=self.create_video.get(),
+            device=device,
+            use_directml=use_directml
+        )
+
+        csv_path = os.path.join(output_dir, 'analysis_results.csv')
+
+        # 行動解析
+        print("行動解析を開始...")
+        analyzer = BehaviorAnalyzer(
+            csv_path=csv_path,
+            time_interval_minutes=self.time_interval.get(),
+            day_start_time=self.day_start.get(),
+            night_start_time=self.night_start.get(),
+            measurement_start_time=self.measurement_start.get(),
+            measurement_date=measurement_date
+        )
+
+        analyzer.load_data()
+        analyzer.calculate_movement()
+        analyzer.calculate_immobility_ratio()
+        analyzer.aggregate_by_time()
+        analyzer.apply_moving_average(window=1)
+        analyzer.create_plots(output_dir)
+        analyzer.save_detailed_csv(output_dir)
+        analyzer.generate_summary_report(output_dir)
 
     def _on_single_completion(self, success, message):
         """単一フォルダモード完了時の処理"""
@@ -648,6 +765,30 @@ class InferenceAnalysisGUI:
         results = []  # (folder_path, success, message)
         analysis_results = []  # 統合解析用のデータ収集
 
+        # ONNX使用時の事前準備
+        use_onnx = self.batch_use_onnx.get()
+        device = self.batch_inference_device.get()
+        onnx_model_path = None
+
+        if use_onnx:
+            model_path = self.model_path.get()
+            if model_path.endswith('.pth'):
+                onnx_model_path = model_path.replace('.pth', '.onnx')
+                if not os.path.exists(onnx_model_path):
+                    print(f"ONNXモデルが見つかりません。変換中: {model_path} -> {onnx_model_path}")
+                    try:
+                        from export_onnx import export_to_onnx
+                        export_to_onnx(model_path, onnx_model_path)
+                        print(f"✓ ONNX変換完了: {onnx_model_path}")
+                    except Exception as e:
+                        error_msg = f"ONNX変換エラー: {str(e)}"
+                        print(error_msg)
+                        self.root.after(0, lambda: self._on_batch_completion([(None, False, error_msg)]))
+                        return
+            else:
+                onnx_model_path = model_path
+            print(f"バッチ処理: ONNX Runtime使用 (device: {device})")
+
         for idx, (folder_path, image_count, meas_date, meas_time) in enumerate(self.detected_folders):
             try:
                 # ステータス更新
@@ -659,18 +800,26 @@ class InferenceAnalysisGUI:
                 # 測定日付を変換
                 measurement_date = datetime.strptime(meas_date, '%Y-%m-%d').date()
 
-                # 推論と解析を実行
-                analysis_info = run_inference_and_analysis(
-                    images_dir=folder_path,
-                    output_dir=output_dir,
-                    model_path=self.model_path.get(),
-                    create_video=self.create_video.get(),
-                    time_interval_minutes=self.time_interval.get(),
-                    day_start_time=self.day_start.get(),
-                    night_start_time=self.night_start.get(),
-                    measurement_start_time=meas_time,
-                    measurement_date=measurement_date
-                )
+                # ONNX使用時とPyTorch使用時で処理を分岐
+                if use_onnx:
+                    # ONNX推論 + 行動解析
+                    analysis_info = self._run_batch_onnx_analysis(
+                        folder_path, output_dir, onnx_model_path,
+                        device, meas_time, measurement_date
+                    )
+                else:
+                    # PyTorch推論 + 行動解析
+                    analysis_info = run_inference_and_analysis(
+                        images_dir=folder_path,
+                        output_dir=output_dir,
+                        model_path=self.model_path.get(),
+                        create_video=self.create_video.get(),
+                        time_interval_minutes=self.time_interval.get(),
+                        day_start_time=self.day_start.get(),
+                        night_start_time=self.night_start.get(),
+                        measurement_start_time=meas_time,
+                        measurement_date=measurement_date
+                    )
 
                 results.append((folder_path, True, "成功"))
 
@@ -722,6 +871,66 @@ class InferenceAnalysisGUI:
 
         # 完了処理
         self.root.after(0, lambda: self._on_batch_completion(results))
+
+    def _run_batch_onnx_analysis(self, images_dir, output_dir, model_path, device, meas_time, measurement_date):
+        """バッチ処理用のONNX推論 + 行動解析"""
+        import json
+        from inference_onnx import inference_onnx
+        from behavior_analysis import BehaviorAnalyzer
+
+        # 時間設定を保存
+        time_config = {
+            'day_start_time': self.day_start.get(),
+            'night_start_time': self.night_start.get(),
+            'measurement_start_time': meas_time,
+            'measurement_date': measurement_date.strftime('%Y-%m-%d')
+        }
+        config_path = os.path.join(output_dir, 'time_config.json')
+        os.makedirs(output_dir, exist_ok=True)
+        with open(config_path, 'w') as f:
+            json.dump(time_config, f, indent=2)
+
+        # ONNX推論
+        use_directml = (device == 'directml')
+        inference_onnx(
+            images_dir=images_dir,
+            output_dir=output_dir,
+            model_path=model_path,
+            create_video=self.create_video.get(),
+            device=device,
+            use_directml=use_directml
+        )
+
+        csv_path = os.path.join(output_dir, 'analysis_results.csv')
+
+        # 行動解析
+        analyzer = BehaviorAnalyzer(
+            csv_path=csv_path,
+            time_interval_minutes=self.time_interval.get(),
+            day_start_time=self.day_start.get(),
+            night_start_time=self.night_start.get(),
+            measurement_start_time=meas_time,
+            measurement_date=measurement_date
+        )
+
+        analyzer.load_data()
+        analyzer.calculate_movement()
+        analyzer.calculate_immobility_ratio()
+        analyzer.aggregate_by_time()
+        analyzer.apply_moving_average(window=1)
+        analyzer.create_plots(output_dir)
+        analyzer.save_detailed_csv(output_dir)
+        analyzer.generate_summary_report(output_dir)
+
+        # 解析結果情報を返す
+        return {
+            'output_dir': output_dir,
+            'aggregated_csv': os.path.join(output_dir, 'aggregated_immobility_analysis.csv'),
+            'detailed_csv': os.path.join(output_dir, 'detailed_immobility_analysis.csv'),
+            'summary_csv': os.path.join(output_dir, 'day_night_summary.csv'),
+            'time_interval': self.time_interval.get()
+        }
+
 
     def _update_batch_status(self, index, folder_path):
         """バッチ処理のステータスを更新"""

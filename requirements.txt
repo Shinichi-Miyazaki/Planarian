@@ -15,5 +15,8 @@ segmentation-models-pytorch>=0.3.0
 tqdm>=4.65.0
 
 # ONNX Runtime（GPU推論用・オプション）
-# pip install onnx onnxruntime-directml
+# Windows GPU (DirectML): pip install onnx onnxruntime-directml
+# NVIDIA GPU (CUDA): pip install onnx onnxruntime-gpu
+# ※ RTX 5070 Ti等の新しいGPUはonnxruntime-gpu (CUDA) を推奨
+# ※ onnxruntimeとonnxruntime-directml/onnxruntime-gpuは同時にインストール不可
 
