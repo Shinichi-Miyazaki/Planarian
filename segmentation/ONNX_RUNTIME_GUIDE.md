@@ -18,11 +18,17 @@ ONNX Runtimeを使用することで、PyTorchが未対応のGPU（RTX 5070 Ti�
 
 ## 📦 インストール
 
-### 基本パッケージ
+### 基本パッケージ（必須）
+
+PyTorchモデルをONNXに変換するには`onnx`パッケージが必要です：
 
 ```powershell
 pip install onnx onnxruntime
 ```
+
+**パッケージの役割:**
+- `onnx`: モデル変換・検証用
+- `onnxruntime`: CPU推論用
 
 ### GPU対応（Windows - DirectML）
 
@@ -48,6 +54,32 @@ pip install onnxruntime-gpu
 ## 🚀 使い方
 
 ### ステップ1: PyTorchモデルをONNXに変換
+
+#### 方法1: GUIから自動変換（推奨）
+
+`inference_analysis_gui.py`を起動し、「ONNX Runtimeを使用」にチェックを入れて実行すると、ONNXモデルが存在しない場合に自動的に変換を提案します。
+
+```powershell
+python segmentation/inference_analysis_gui.py
+```
+
+#### 方法2: 専用GUIツールを使用
+
+ONNX変換専用のGUIツールを使用できます：
+
+```powershell
+python segmentation/export_onnx_gui.py
+```
+
+このツールでは以下を設定できます：
+- 入力モデル (.pth)
+- 出力モデル (.onnx)
+- 画像サイズ
+- ONNX Opsetバージョン
+
+変換ログがリアルタイムで表示されます。
+
+#### 方法3: コマンドラインから変換
 
 ```powershell
 cd segmentation
@@ -287,4 +319,4 @@ NVIDIA, AMD, Intel等のGPUで動作します。
 
 ---
 
-**最終更新: 2026年2月7日**
+**最終更新: 2026年2月9日**

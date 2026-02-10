@@ -40,9 +40,15 @@ def export_to_onnx(
     print(f"入力モデル: {model_path}")
     print(f"出力モデル: {output_path}")
     print(f"画像サイズ: {image_size}")
+    print(f"ONNX opset: {opset_version}")
+
+    # 入力モデルの存在確認
+    if not os.path.exists(model_path):
+        print(f"\n❌ エラー: モデルファイルが存在しません: {model_path}")
+        raise FileNotFoundError(f"モデルファイルが存在しません: {model_path}")
 
     # モデルをロード
-    print("\nモデルを読み込み中...")
+    print("\n[1/4] モデルを読み込み中...")
     model = UNetModel(
         encoder_name=config.ENCODER_NAME,
         encoder_weights=None,
@@ -72,13 +78,15 @@ def export_to_onnx(
     model.load_state_dict(new_state_dict, strict=False)
     model.eval()
 
-    print("✓ モデル読み込み完了")
+    print("      ✓ モデル読み込み完了")
 
     # ダミー入力を作成
+    print("\n[2/4] ダミー入力を作成中...")
     dummy_input = torch.randn(1, 3, image_size[0], image_size[1])
+    print("      ✓ ダミー入力作成完了")
 
     # ONNX変換
-    print("\nONNX形式に変換中...")
+    print("\n[3/4] ONNX形式に変換中...")
     torch.onnx.export(
         model,
         dummy_input,
@@ -94,26 +102,26 @@ def export_to_onnx(
         }
     )
 
-    print(f"✓ ONNX変換完了: {output_path}")
+    print("      ✓ ONNX変換完了")
 
     # 変換されたモデルのサイズを確認
     onnx_size = os.path.getsize(output_path) / (1024 * 1024)
-    print(f"  モデルサイズ: {onnx_size:.2f} MB")
+    print(f"      モデルサイズ: {onnx_size:.2f} MB")
 
     # ONNXモデルの検証
-    print("\nONNXモデルを検証中...")
+    print("\n[4/4] ONNXモデルを検証中...")
     try:
         import onnx
         onnx_model = onnx.load(output_path)
         onnx.checker.check_model(onnx_model)
-        print("✓ ONNXモデルは有効です")
+        print("      ✓ ONNXモデルは有効です")
     except ImportError:
-        print("⚠ onnxパッケージがインストールされていません（検証スキップ）")
+        print("      ⚠ onnxパッケージがインストールされていません（検証スキップ）")
     except Exception as e:
-        print(f"⚠ 検証エラー: {e}")
+        print(f"      ⚠ 検証エラー: {e}")
 
     print(f"\n{'='*60}")
-    print(f"  変換完了")
+    print(f"  ✅ 変換完了: {output_path}")
     print(f"{'='*60}\n")
 
     return output_path
