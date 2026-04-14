@@ -282,6 +282,12 @@ class BehaviorAnalyzer:
         if self.processed_df is not None:
             aggregated_csv_path = os.path.join(output_dir, 'aggregated_immobility_analysis.csv')
             processed_with_time = self.processed_df.copy()
+
+            # time_binをInterval型から数値インデックスに変換
+            # (バッチ統合解析で数値として使用するため)
+            if pd.api.types.is_interval_dtype(processed_with_time['time_bin']):
+                processed_with_time['time_bin'] = range(len(processed_with_time))
+
             # NaTを含む行は昼夜判定をスキップ
             processed_with_time['is_day'] = processed_with_time['datetime'].apply(
                 lambda x: self._is_daytime(x) if pd.notna(x) else None
